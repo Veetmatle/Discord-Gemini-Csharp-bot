@@ -8,8 +8,13 @@ public class GeminiService(string apiKey)
 {
     private readonly HttpClient _httpClient = new();
     private const string ApiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    private readonly string _promptPrefix =
+        "\n Answer in Polish in max 100 words. Be brief and precise unless instructions say otherwise.";
 
-    public async Task<string> GetAnswerAsync(string prompt)
+    /// <summary>
+    /// Sends a prompt to Google's Gemini API and retrieves the generated text response.
+    /// </summary>
+    public async Task<string> GetAnswerAsync(string question)
     {
         try
         {
@@ -17,7 +22,7 @@ public class GeminiService(string apiKey)
             {
                 contents = new[]
                 {
-                    new Content { parts = new[] { new Part { text = prompt } } }
+                    new Content { parts = new[] { new Part { text = question + this._promptPrefix } } }
                 }
             };
 

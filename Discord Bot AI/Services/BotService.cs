@@ -16,11 +16,8 @@ public class BotService
     private RiotService? _riot;
     private readonly List<ulong> _guildIds = new();
     private readonly UserRegistry _userRegistry = new();
-    private IMatchNotification? _notificationStrategy;
+    private List<IMatchNotification> _notificationStrategies = new();
     private IGameSummaryRenderer? _renderer;
-    
-    private readonly string _promptPrefix =
-        "\n Answer in Polish in max 100 words. Be brief and precise unless instructions say otherwise.";
 
     public BotService()
     {
@@ -37,7 +34,8 @@ public class BotService
 
         _gemini = new GeminiService(_config.GeminiApiKey);
         _riot = new RiotService(_config.RiotToken);
-        _notificationStrategy = new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync);
+        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
+        _notificationStrategies.Add(new CommandStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
         
         foreach (var id in _config.ServerIds)
         {
@@ -50,7 +48,10 @@ public class BotService
         await _client.LoginAsync(TokenType.Bot, _config.DiscordToken);
         await _client.StartAsync();
         
-        _ = _notificationStrategy.StartMonitoringAsync();
+        foreach(var strategy in _notificationStrategies) 
+        {
+            _ = strategy.StartMonitoringAsync();
+        }
         
         await Task.Delay(-1);
     }
@@ -141,7 +142,7 @@ public class BotService
 
         var queryOption = subCommand.Options.FirstOrDefault(o => o.Name == "query");
         var question = queryOption?.Value?.ToString() ?? "No question provided";
-        var answer = await _gemini!.GetAnswerAsync(question + this._promptPrefix);
+        var answer = await _gemini!.GetAnswerAsync(question);
 
         string response = $"**Question:**\n {question}\n**Answer:**\n {answer}";
         await command.FollowupAsync(response);
@@ -174,6 +175,9 @@ public class BotService
         }
     }
     
+    /// <summary>
+    /// Method to notify a Discord channel when a match is finished.
+    /// </summary>
     private async Task NotifyMatchFinishedAsync(RiotAccount account, MatchData matchData)
     {
         var guild = _client.GetGuild(_guildIds.FirstOrDefault()); 
@@ -186,6 +190,9 @@ public class BotService
         }
     }
 
+    /// <summary>
+    /// Loads bot configuration from the config.json file.
+    /// </summary>
     private async Task LoadConfigAsync()
     {
         if (!File.Exists("config.json")) throw new FileNotFoundException();

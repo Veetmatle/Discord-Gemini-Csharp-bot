@@ -45,6 +45,9 @@ public class UserRegistry
         File.WriteAllText(FilePath, json);
     }
 
+    /// <summary>
+    /// Loads the user registry from a JSON file if it exists.
+    /// </summary>
     private void Load()
     {
         if (File.Exists(FilePath))

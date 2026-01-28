@@ -26,6 +26,9 @@ public class PollingStrategy : IMatchNotification
         }
     }
 
+    /// <summary>
+    /// Internal method that checks all tracked users for new match completions.
+    /// </summary>
     private async Task CheckMatchesInternalAsync()
     {
         var users = _userRegistry.GetAllTrackedUsers();

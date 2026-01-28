@@ -1,8 +1,4 @@
-﻿using System.Net;
-using System.Text;
-using Discord_Bot_AI.Models;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
+﻿using Discord_Bot_AI.Models;
 using System.Net.Http.Json;
 
 namespace Discord_Bot_AI.Services;
@@ -34,6 +30,9 @@ public class RiotService
         return await response.Content.ReadFromJsonAsync<RiotAccount>();
     }
 
+    /// <summary>
+    /// Method is used to get the latest match ID for a given player's PUUID.
+    /// </summary>
     public async Task<string?> GetLatestMatchIdAsync(string puuid)
     {
         var url = $"{BaseUrl}/by-puuid/{puuid}/ids?start=0&count=1";
@@ -45,6 +44,9 @@ public class RiotService
         return matchIds?.FirstOrDefault();
     }
     
+    /// <summary>
+    /// Method is used to get detailed match information based on match ID.
+    /// </summary>
     public async Task<MatchData?> GetMatchDetailsAsync(string matchId)
     {
         var url = $"{BaseUrl}/{matchId}";

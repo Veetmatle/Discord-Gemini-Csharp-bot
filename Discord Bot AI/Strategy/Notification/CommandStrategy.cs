@@ -16,8 +16,15 @@ public class CommandStrategy : IMatchNotification
         _userRegistry = registry;
         _onMatchFound = onMatchFound;
     }
+    
+    /// <summary>
+    /// Command strategy doesn't require background monitoring.
+    /// </summary>
     public Task StartMonitoringAsync() => Task.CompletedTask;
     
+    /// <summary>
+    /// Checks and retrieves the latest match data for a specific Discord user on demand.
+    /// </summary>
     public async Task CheckUserMatchAsync(ulong discordId)
     {
         var account = _userRegistry.GetAccount(discordId);

@@ -1,6 +1,11 @@
-﻿namespace Discord_Bot_AI.Strategy.Rendering;
+﻿using Discord_Bot_AI.Models;
 
-public class HtmlRenderer
+namespace Discord_Bot_AI.Strategy.Rendering;
+
+public class HtmlRenderer : IGameSummaryRenderer
 {
-    
+    public Task<Stream> RenderSummaryAsync(RiotAccount account, MatchData matchData)
+    {
+        throw new NotImplementedException();
+    }
 }
