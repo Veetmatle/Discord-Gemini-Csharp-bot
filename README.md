@@ -84,7 +84,7 @@ docker build -t discord-bot-ai .
 
 ## Security Notes
 
-- ⚠️ **NEVER commit `.env` to version control**
+-  **NEVER commit `.env` to version control**
 - The container runs as a non-root user
 - Read-only filesystem with tmpfs for temporary files
 - Resource limits prevent runaway processes
