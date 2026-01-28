@@ -1,0 +1,53 @@
+﻿services:
+  discord-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: discord-bot-ai
+    restart: unless-stopped
+    
+    # Environment variables from .env file
+    env_file:
+      - .env
+    
+    # Persistent volumes for data, cache, and logs
+    volumes:
+      - bot-data:/app/data      # User registry data (persisted)
+      - bot-cache:/app/cache    # Image cache (persisted for performance)
+      - bot-logs:/app/logs      # Application logs
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Graceful shutdown timeout
+    stop_grace_period: 30s
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for data persistence
+volumes:
+  bot-data:
+    name: discord-bot-data
+  bot-cache:
+    name: discord-bot-cache
+  bot-logs:
+    name: discord-bot-logs

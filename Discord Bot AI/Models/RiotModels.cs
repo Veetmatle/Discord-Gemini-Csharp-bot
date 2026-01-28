@@ -36,4 +36,18 @@ public class Participant
     public int assists { get; set; }
     public string championName { get; set; }
     public bool win { get; set; }
+    
+    // ITEMS
+    public int item0 { get; set; }
+    public int item1 { get; set; }
+    public int item2 { get; set; }
+    public int item3 { get; set; }
+    public int item4 { get; set; }
+    public int item5 { get; set; }
+    public int item6 { get; set; } 
+    
+    // Additional stats
+    public int totalMinionsKilled { get; set; } // All minions
+    public int neutralMinionsKilled { get; set; } // Jungle minions
+    public int goldEarned { get; set; }
 }

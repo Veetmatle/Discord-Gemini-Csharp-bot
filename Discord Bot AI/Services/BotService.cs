@@ -2,58 +2,234 @@
 using Discord;
 using Discord.WebSocket;
 using Discord_Bot_AI.Models;
+using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Strategy.Notification;
 using Discord_Bot_AI.Strategy.Rendering;
-using Newtonsoft.Json;
+using Serilog;
 
 namespace Discord_Bot_AI.Services;
 
-public class BotService
+/// <summary>
+/// Main orchestrator service for the Discord bot, managing all subsystems and their lifecycle.
+/// Implements IAsyncDisposable for graceful shutdown support (Docker-friendly).
+/// </summary>
+public class BotService : IAsyncDisposable
 {
     private readonly DiscordSocketClient _client;
-    private Config? _config;
+    private readonly AppSettings _settings;
     private GeminiService? _gemini;
     private RiotService? _riot;
+    private RiotImageCacheService? _imageCache;
+    private ImageSharpRenderer? _renderer;
     private readonly List<ulong> _guildIds = new();
-    private readonly UserRegistry _userRegistry = new();
-    private List<IMatchNotification> _notificationStrategies = new();
-    private IGameSummaryRenderer? _renderer;
+    private IUserRegistry? _userRegistry;
+    private readonly List<IMatchNotification> _notificationStrategies = new();
+    private readonly CancellationTokenSource _shutdownCts = new();
+    private DateTime _startTime;
+    private bool _disposed;
 
-    public BotService()
+    /// <summary>
+    /// Creates a new BotService with the provided settings.
+    /// </summary>
+    /// <param name="settings">Application settings loaded from environment or config.</param>
+    public BotService(AppSettings settings)
     {
+        _settings = settings;
         var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent };
         _client = new DiscordSocketClient(config);
         _client.Ready += OnReadyAsync;
         _client.SlashCommandExecuted += OnSlashCommandAsync;
+        _client.Log += OnDiscordLogAsync;
     }
 
+    /// <summary>
+    /// Starts the bot and all its subsystems. Blocks until shutdown is requested.
+    /// </summary>
     public async Task RunAsync()
     {
-        await LoadConfigAsync();
-        if (_config == null) return;
-
-        _gemini = new GeminiService(_config.GeminiApiKey);
-        _riot = new RiotService(_config.RiotToken);
-        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
-        _notificationStrategies.Add(new CommandStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
+        _startTime = DateTime.UtcNow;
         
-        foreach (var id in _config.ServerIds)
+        ValidateSettings();
+
+        InitializeCoreServices();
+        InitializeRenderingSystem();
+        InitializeNotificationStrategies();
+        ParseGuildIds();
+
+        RegisterShutdownHandlers();
+
+        await StartDiscordClientAsync();
+        
+        StartBackgroundMonitoring();
+        
+        Log.Information("Bot started successfully. Uptime tracking started.");
+
+        try
+        {
+            await Task.Delay(Timeout.Infinite, _shutdownCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Information("Shutdown signal received");
+        }
+        
+        await ShutdownAsync();
+    }
+
+    /// <summary>
+    /// Validates the application settings.
+    /// </summary>
+    private void ValidateSettings()
+    {
+        var errors = new List<string>();
+        
+        if (string.IsNullOrWhiteSpace(_settings.DiscordToken))
+            errors.Add("DISCORD_TOKEN is required");
+        if (string.IsNullOrWhiteSpace(_settings.GeminiApiKey))
+            errors.Add("GEMINI_API_KEY is required");
+        if (string.IsNullOrWhiteSpace(_settings.RiotToken))
+            errors.Add("RIOT_TOKEN is required");
+        if (_settings.ServerIds.Count == 0)
+            errors.Add("SERVER_IDS is required (comma-separated)");
+            
+        if (errors.Count > 0)
+        {
+            foreach (var error in errors)
+                Log.Error("Configuration error: {Error}", error);
+            throw new InvalidOperationException($"Configuration validation failed with {errors.Count} error(s)");
+        }
+        
+        Log.Information("Configuration validated successfully");
+    }
+
+    /// <summary>
+    /// Returns the current health status of the bot for monitoring purposes.
+    /// </summary>
+    public HealthStatus GetHealthStatus()
+    {
+        return new HealthStatus
+        {
+            IsHealthy = _client.ConnectionState == ConnectionState.Connected,
+            Uptime = DateTime.UtcNow - _startTime,
+            ConnectionState = _client.ConnectionState.ToString(),
+            TrackedUsersCount = _userRegistry?.GetAllTrackedUsers().Count ?? 0,
+            RiotApiRateLimited = _riot?.IsRateLimited ?? false,
+            GeminiApiRateLimited = _gemini?.IsRateLimited ?? false
+        };
+    }
+
+    /// <summary>
+    /// Handles Discord.NET log messages and forwards them to Serilog.
+    /// </summary>
+    private Task OnDiscordLogAsync(LogMessage msg)
+    {
+        var severity = msg.Severity switch
+        {
+            LogSeverity.Critical => Serilog.Events.LogEventLevel.Fatal,
+            LogSeverity.Error => Serilog.Events.LogEventLevel.Error,
+            LogSeverity.Warning => Serilog.Events.LogEventLevel.Warning,
+            LogSeverity.Info => Serilog.Events.LogEventLevel.Information,
+            LogSeverity.Verbose => Serilog.Events.LogEventLevel.Verbose,
+            LogSeverity.Debug => Serilog.Events.LogEventLevel.Debug,
+            _ => Serilog.Events.LogEventLevel.Information
+        };
+        
+        Log.Write(severity, msg.Exception, "[Discord] {Message}", msg.Message);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Registers handlers for OS shutdown signals (SIGTERM, SIGINT, etc.).
+    /// </summary>
+    private void RegisterShutdownHandlers()
+    {
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            Log.Information("SIGINT received, initiating shutdown...");
+            _shutdownCts.Cancel();
+        };
+        
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            Log.Information("Process exit detected, initiating shutdown...");
+            _shutdownCts.Cancel();
+        };
+    }
+
+    /// <summary>
+    /// Gracefully shuts down all bot subsystems.
+    /// </summary>
+    private async Task ShutdownAsync()
+    {
+        Log.Information("Shutting down...");
+        
+        var stopTasks = _notificationStrategies.Select(s => s.StopMonitoringAsync()).ToList();
+        await Task.WhenAll(stopTasks);
+        
+        await _client.StopAsync();
+        await _client.LogoutAsync();
+        
+        Log.Information("Shutdown complete");
+    }
+
+    /// <summary>
+    /// Initializes core API services (Gemini AI, Riot API).
+    /// </summary>
+    private void InitializeCoreServices()
+    {
+        _userRegistry = new UserRegistry(_settings.DataPath);
+        _gemini = new GeminiService(_settings.GeminiApiKey);
+        _riot = new RiotService(_settings.RiotToken);
+        Log.Information("Core services initialized");
+    }
+
+    /// <summary>
+    /// Initializes the rendering system for match summaries.
+    /// </summary>
+    private void InitializeRenderingSystem()
+    {
+        _imageCache = new RiotImageCacheService(_settings.RiotVersion, _settings.CachePath);
+        _renderer = new ImageSharpRenderer(_imageCache);
+        Log.Information("Rendering system initialized");
+    }
+
+    /// <summary>
+    /// Initializes notification strategies for match detection.
+    /// </summary>
+    private void InitializeNotificationStrategies()
+    {
+        _notificationStrategies.Add(new PollingStrategy(_riot!, _userRegistry!, NotifyMatchFinishedAsync));
+        _notificationStrategies.Add(new CommandStrategy(_riot!, _userRegistry!, NotifyMatchFinishedAsync));
+        Log.Information("Notification strategies initialized: {Count}", _notificationStrategies.Count);
+    }
+
+    /// <summary>
+    /// Parses guild IDs from configuration.
+    /// </summary>
+    private void ParseGuildIds()
+    {
+        foreach (var id in _settings.ServerIds)
         {
             if (ulong.TryParse(id, out ulong guildId))
             {
                 _guildIds.Add(guildId);
             }
         }
+    }
 
-        await _client.LoginAsync(TokenType.Bot, _config.DiscordToken);
+    private async Task StartDiscordClientAsync()
+    {
+        await _client.LoginAsync(TokenType.Bot, _settings.DiscordToken);
         await _client.StartAsync();
-        
-        foreach(var strategy in _notificationStrategies) 
+    }
+
+    private void StartBackgroundMonitoring()
+    {
+        foreach (var strategy in _notificationStrategies)
         {
             _ = strategy.StartMonitoringAsync();
         }
-        
-        await Task.Delay(-1);
     }
 
     private async Task OnReadyAsync()
@@ -166,6 +342,7 @@ public class BotService
         var account = await _riot.GetAccountAsync(nick, tag);
         if (account != null)
         {
+            account.LastMatchId = await _riot.GetLatestMatchIdAsync(account.puuid);
             _userRegistry.RegisterUser(command.User.Id, account);
             await command.FollowupAsync($"Account registered: **{account.gameName}#{account.tagLine}**.");
         }
@@ -191,12 +368,25 @@ public class BotService
     }
 
     /// <summary>
-    /// Loads bot configuration from the config.json file.
+    /// Releases all resources used by the bot service.
     /// </summary>
-    private async Task LoadConfigAsync()
+    public async ValueTask DisposeAsync()
     {
-        if (!File.Exists("config.json")) throw new FileNotFoundException();
-        string json = await File.ReadAllTextAsync("config.json");
-        _config = JsonConvert.DeserializeObject<Config>(json) ?? throw new Exception("Config error");
+        if (_disposed) return;
+        
+        _shutdownCts.Cancel();
+        _shutdownCts.Dispose();
+        
+        _gemini?.Dispose();
+        _riot?.Dispose();
+        _imageCache?.Dispose();
+        _renderer?.Dispose();
+        _userRegistry?.Dispose();
+        
+        await _client.DisposeAsync();
+        
+        _disposed = true;
+        Log.Debug("BotService disposed");
+        GC.SuppressFinalize(this);
     }
 }
