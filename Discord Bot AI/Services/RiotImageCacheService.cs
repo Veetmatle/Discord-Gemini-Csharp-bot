@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+﻿﻿using System.Collections.Concurrent;
 using Serilog;
 
 namespace Discord_Bot_AI.Services;
@@ -60,8 +60,9 @@ public class RiotImageCacheService : IDisposable
     /// Retrieves the local file path for a champion's icon, downloading it from Data Dragon if it is not already present in the cache.
     /// </summary>
     /// <param name="championName">The internal name of the champion.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The full local path to the champion icon image.</returns>
-    public async Task<string> GetChampionIconAsync(string championName)
+    public async Task<string> GetChampionIconAsync(string championName, CancellationToken cancellationToken = default)
     {
         string fileName = $"{championName}.png";
         string localPath = Path.Combine(_cachePath, "champions", fileName);
@@ -73,7 +74,7 @@ public class RiotImageCacheService : IDisposable
         }
 
         string url = $"https://ddragon.riotgames.com/cdn/{_version}/img/champion/{fileName}";
-        await DownloadImageAsync(url, localPath);
+        await DownloadImageAsync(url, localPath, cancellationToken);
 
         return localPath;
     }
@@ -83,8 +84,9 @@ public class RiotImageCacheService : IDisposable
     /// Returns an empty string if the item ID is 0 (empty slot).
     /// </summary>
     /// <param name="itemId">The unique ID of the item.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The local path to the item icon image, or an empty string if the ID is 0.</returns>
-    public async Task<string> GetItemIconAsync(int itemId)
+    public async Task<string> GetItemIconAsync(int itemId, CancellationToken cancellationToken = default)
     {
         if (itemId == 0) return string.Empty;
 
@@ -98,7 +100,7 @@ public class RiotImageCacheService : IDisposable
         }
 
         string url = $"https://ddragon.riotgames.com/cdn/{_version}/img/item/{fileName}";
-        await DownloadImageAsync(url, localPath);
+        await DownloadImageAsync(url, localPath, cancellationToken);
 
         return localPath;
     }
@@ -109,27 +111,35 @@ public class RiotImageCacheService : IDisposable
     /// </summary>
     /// <param name="url">The remote Data Dragon URL to download from.</param>
     /// <param name="destination">The local file path where the image should be saved.</param>
-    private async Task DownloadImageAsync(string url, string destination)
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    private async Task DownloadImageAsync(string url, string destination, CancellationToken cancellationToken)
     {
         var lockObj = _downloadLocks.GetOrAdd(destination, _ => new SemaphoreSlim(1, 1));
         
-        await lockObj.WaitAsync();
+        await lockObj.WaitAsync(cancellationToken);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            
             if (_cachedFiles.ContainsKey(destination) || File.Exists(destination))
             {
                 _cachedFiles[destination] = true;
                 return;
             }
 
-            var data = await _httpClient.GetByteArrayAsync(url);
+            var data = await _httpClient.GetByteArrayAsync(url, cancellationToken);
             
             var tempPath = destination + ".tmp";
-            await File.WriteAllBytesAsync(tempPath, data);
+            await File.WriteAllBytesAsync(tempPath, data, cancellationToken);
             File.Move(tempPath, destination, overwrite: true);
             
             _cachedFiles[destination] = true;
             Log.Debug("Downloaded and cached: {Destination}", destination);
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("Image download cancelled: {Url}", url);
+            throw;
         }
         catch (Exception ex)
         {

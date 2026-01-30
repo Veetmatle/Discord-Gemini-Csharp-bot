@@ -1,10 +1,11 @@
-﻿using Discord_Bot_AI.Data;
+﻿﻿using Discord_Bot_AI.Data;
 using Discord;
 using Discord.WebSocket;
 using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Strategy.Notification;
 using Discord_Bot_AI.Strategy.Rendering;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 
 namespace Discord_Bot_AI.Services;
@@ -17,24 +18,32 @@ public class BotService : IAsyncDisposable
 {
     private readonly DiscordSocketClient _client;
     private readonly AppSettings _settings;
-    private GeminiService? _gemini;
-    private RiotService? _riot;
-    private RiotImageCacheService? _imageCache;
-    private ImageSharpRenderer? _renderer;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly GeminiService _gemini;
+    private readonly RiotService _riot;
+    private readonly RiotImageCacheService _imageCache;
+    private readonly IGameSummaryRenderer _renderer;
+    private readonly IUserRegistry _userRegistry;
     private readonly List<ulong> _guildIds = new();
-    private IUserRegistry? _userRegistry;
     private readonly List<IMatchNotification> _notificationStrategies = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private DateTime _startTime;
     private bool _disposed;
 
     /// <summary>
-    /// Creates a new BotService with the provided settings.
+    /// Creates a new BotService with dependencies injected from DI container.
     /// </summary>
-    /// <param name="settings">Application settings loaded from environment or config.</param>
-    public BotService(AppSettings settings)
+    /// <param name="serviceProvider">DI service provider for resolving dependencies.</param>
+    public BotService(IServiceProvider serviceProvider)
     {
-        _settings = settings;
+        _serviceProvider = serviceProvider;
+        _settings = serviceProvider.GetRequiredService<AppSettings>();
+        _gemini = serviceProvider.GetRequiredService<GeminiService>();
+        _riot = serviceProvider.GetRequiredService<RiotService>();
+        _imageCache = serviceProvider.GetRequiredService<RiotImageCacheService>();
+        _renderer = serviceProvider.GetRequiredService<IGameSummaryRenderer>();
+        _userRegistry = serviceProvider.GetRequiredService<IUserRegistry>();
+        
         var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent };
         _client = new DiscordSocketClient(config);
         _client.Ready += OnReadyAsync;
@@ -51,8 +60,6 @@ public class BotService : IAsyncDisposable
         
         ValidateSettings();
 
-        InitializeCoreServices();
-        InitializeRenderingSystem();
         InitializeNotificationStrategies();
         ParseGuildIds();
 
@@ -112,9 +119,9 @@ public class BotService : IAsyncDisposable
             IsHealthy = _client.ConnectionState == ConnectionState.Connected,
             Uptime = DateTime.UtcNow - _startTime,
             ConnectionState = _client.ConnectionState.ToString(),
-            TrackedUsersCount = _userRegistry?.GetAllTrackedUsers().Count ?? 0,
-            RiotApiRateLimited = _riot?.IsRateLimited ?? false,
-            GeminiApiRateLimited = _gemini?.IsRateLimited ?? false
+            TrackedUsersCount = _userRegistry.GetAllTrackedUsers().Count,
+            RiotApiRateLimited = _riot.IsRateLimited,
+            GeminiApiRateLimited = _gemini.IsRateLimited
         };
     }
 
@@ -174,33 +181,12 @@ public class BotService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Initializes core API services (Gemini AI, Riot API).
-    /// </summary>
-    private void InitializeCoreServices()
-    {
-        _userRegistry = new UserRegistry(_settings.DataPath);
-        _gemini = new GeminiService(_settings.GeminiApiKey);
-        _riot = new RiotService(_settings.RiotToken);
-        Log.Information("Core services initialized");
-    }
-
-    /// <summary>
-    /// Initializes the rendering system for match summaries.
-    /// </summary>
-    private void InitializeRenderingSystem()
-    {
-        _imageCache = new RiotImageCacheService(_settings.RiotVersion, _settings.CachePath);
-        _renderer = new ImageSharpRenderer(_imageCache);
-        Log.Information("Rendering system initialized");
-    }
-
-    /// <summary>
     /// Initializes notification strategies for match detection.
     /// </summary>
     private void InitializeNotificationStrategies()
     {
-        _notificationStrategies.Add(new PollingStrategy(_riot!, _userRegistry!, NotifyMatchFinishedAsync));
-        _notificationStrategies.Add(new CommandStrategy(_riot!, _userRegistry!, NotifyMatchFinishedAsync));
+        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
+        _notificationStrategies.Add(new CommandStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
         Log.Information("Notification strategies initialized: {Count}", _notificationStrategies.Count);
     }
 
@@ -318,7 +304,7 @@ public class BotService : IAsyncDisposable
 
         var queryOption = subCommand.Options.FirstOrDefault(o => o.Name == "query");
         var question = queryOption?.Value?.ToString() ?? "No question provided";
-        var answer = await _gemini!.GetAnswerAsync(question);
+        var answer = await _gemini.GetAnswerAsync(question, _shutdownCts.Token);
 
         string response = $"**Question:**\n {question}\n**Answer:**\n {answer}";
         await command.FollowupAsync(response);
@@ -326,8 +312,6 @@ public class BotService : IAsyncDisposable
 
     private async Task RegisterRiotAccountAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
     {
-        if (_riot == null) return;
-        
         await command.DeferAsync();
         
         var nick = subCommand.Options.FirstOrDefault(o => o.Name == "nick")?.Value?.ToString();
@@ -339,10 +323,10 @@ public class BotService : IAsyncDisposable
             return;
         }
         
-        var account = await _riot.GetAccountAsync(nick, tag);
+        var account = await _riot.GetAccountAsync(nick, tag, _shutdownCts.Token);
         if (account != null)
         {
-            account.LastMatchId = await _riot.GetLatestMatchIdAsync(account.puuid);
+            account.LastMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, _shutdownCts.Token);
             _userRegistry.RegisterUser(command.User.Id, account);
             await command.FollowupAsync($"Account registered: **{account.gameName}#{account.tagLine}**.");
         }
@@ -355,15 +339,26 @@ public class BotService : IAsyncDisposable
     /// <summary>
     /// Method to notify a Discord channel when a match is finished.
     /// </summary>
-    private async Task NotifyMatchFinishedAsync(RiotAccount account, MatchData matchData)
+    /// <param name="account">The Riot account of the player.</param>
+    /// <param name="matchData">The match data to display.</param>
+    /// <param name="ct">Cancellation token to cancel the operation.</param>
+    private async Task NotifyMatchFinishedAsync(RiotAccount account, MatchData matchData, CancellationToken ct = default)
     {
         var guild = _client.GetGuild(_guildIds.FirstOrDefault()); 
         var channel = guild?.TextChannels.FirstOrDefault(c => c.Name == "bot"); 
 
-        if (channel != null && _renderer != null)
+        if (channel != null)
         {
-            using var imageStream = await _renderer.RenderSummaryAsync(account, matchData);
-            await channel.SendFileAsync(imageStream, "match.png", $"**{account.gameName}** finished a match!");
+            try
+            {
+                using var imageStream = await _renderer.RenderSummaryAsync(account, matchData, ct);
+                await channel.SendFileAsync(imageStream, "match.png", $"**{account.gameName}** finished a match!",
+                    options: new RequestOptions { CancelToken = ct });
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Debug("Match notification cancelled during shutdown");
+            }
         }
     }
 
@@ -377,13 +372,23 @@ public class BotService : IAsyncDisposable
         _shutdownCts.Cancel();
         _shutdownCts.Dispose();
         
-        _gemini?.Dispose();
-        _riot?.Dispose();
-        _imageCache?.Dispose();
-        _renderer?.Dispose();
-        _userRegistry?.Dispose();
+        // Dispose services - DI container manages their lifecycle,
+        // but we explicitly dispose them for graceful shutdown
+        _gemini.Dispose();
+        _riot.Dispose();
+        _imageCache.Dispose();
+        
+        if (_renderer is IDisposable rendererDisposable)
+            rendererDisposable.Dispose();
+        
+        if (_userRegistry is IDisposable registryDisposable)
+            registryDisposable.Dispose();
         
         await _client.DisposeAsync();
+        
+        // Dispose the DI container
+        if (_serviceProvider is IDisposable disposable)
+            disposable.Dispose();
         
         _disposed = true;
         Log.Debug("BotService disposed");

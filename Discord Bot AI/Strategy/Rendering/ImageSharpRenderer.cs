@@ -37,11 +37,16 @@ public class ImageSharpRenderer : IGameSummaryRenderer, IDisposable
     /// Main method to process match data. Prepares graphical assets asynchronously 
     /// and generates the final summary image as a stream with timeout protection.
     /// </summary>
-    public async Task<Stream> RenderSummaryAsync(RiotAccount account, MatchData matchData)
+    /// <param name="account">The Riot account of the player.</param>
+    /// <param name="matchData">The match data to render.</param>
+    /// <param name="cancellationToken">External token to cancel the operation.</param>
+    /// <returns>A stream containing the rendered PNG image.</returns>
+    public async Task<Stream> RenderSummaryAsync(RiotAccount account, MatchData matchData, CancellationToken cancellationToken = default)
     {
         using var timeoutCts = new CancellationTokenSource(RenderTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         
-        if (!await _renderQueue.WaitAsync(RenderTimeout))
+        if (!await _renderQueue.WaitAsync(RenderTimeout, linkedCts.Token))
         {
             Log.Warning("Render queue full, request timed out waiting for slot");
             throw new TimeoutException("Render queue is full. Please try again later.");
@@ -49,7 +54,7 @@ public class ImageSharpRenderer : IGameSummaryRenderer, IDisposable
         
         try
         {
-            return await RenderSummaryInternalAsync(account, matchData, timeoutCts.Token);
+            return await RenderSummaryInternalAsync(account, matchData, linkedCts.Token);
         }
         finally
         {
@@ -67,12 +72,12 @@ public class ImageSharpRenderer : IGameSummaryRenderer, IDisposable
 
         cancellationToken.ThrowIfCancellationRequested();
         
-        string championPath = await _imageCache.GetChampionIconAsync(me.championName);
+        string championPath = await _imageCache.GetChampionIconAsync(me.championName, cancellationToken);
     
         var itemPaths = new List<string>();
         int[] itemIds = { me.item0, me.item1, me.item2, me.item3, me.item4, me.item5, me.item6 };
         
-        var itemTasks = itemIds.Select(id => _imageCache.GetItemIconAsync(id)).ToList();
+        var itemTasks = itemIds.Select(id => _imageCache.GetItemIconAsync(id, cancellationToken)).ToList();
         var results = await Task.WhenAll(itemTasks);
         itemPaths.AddRange(results);
 

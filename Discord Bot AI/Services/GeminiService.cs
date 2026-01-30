@@ -1,19 +1,21 @@
-﻿﻿using System.Net;
+﻿using System.Net;
 using System.Text;
+using Discord_Bot_AI.Configuration;
+using Discord_Bot_AI.Infrastructure;
 using Discord_Bot_AI.Models.Gemini;
 using Newtonsoft.Json;
-using Polly;
-using Polly.Retry;
 using Serilog;
 
 namespace Discord_Bot_AI.Services;
 
 /// <summary>
-/// Service for interacting with Google's Gemini AI API with rate limiting and Polly retry policies.
+/// Service for interacting with Google's Gemini AI API with rate limiting.
+/// Uses IHttpClientFactory for proper HTTP client lifecycle management.
+/// Retry policies are configured centrally in ServiceCollectionExtensions.
 /// </summary>
 public class GeminiService : IDisposable
 {
-    private readonly HttpClient _httpClient;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _apiKey;
     private const string ApiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
     private readonly string _promptPrefix =
@@ -26,38 +28,17 @@ public class GeminiService : IDisposable
     private DateTime _backoffUntil = DateTime.MinValue;
     private readonly object _backoffLock = new();
     
-    private readonly AsyncRetryPolicy<HttpResponseMessage> _retryPolicy;
     private bool _disposed;
 
     /// <summary>
-    /// Initializes the Gemini service with API key and configures retry policies.
+    /// Initializes the Gemini service with IHttpClientFactory for managed HTTP connections.
     /// </summary>
-    /// <param name="apiKey">The Google Gemini API key for authentication.</param>
-    public GeminiService(string apiKey)
+    /// <param name="httpClientFactory">Factory for creating HTTP clients.</param>
+    /// <param name="settings">Application settings containing API key.</param>
+    public GeminiService(IHttpClientFactory httpClientFactory, AppSettings settings)
     {
-        _apiKey = apiKey;
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        
-        _retryPolicy = Policy
-            .HandleResult<HttpResponseMessage>(r => r.StatusCode == HttpStatusCode.TooManyRequests || (int)r.StatusCode >= 500)
-            .Or<HttpRequestException>()
-            .Or<TaskCanceledException>()
-            .WaitAndRetryAsync(
-                retryCount: 3,
-                sleepDurationProvider: (retryAttempt, response, _) =>
-                {
-                    if (response.Result?.StatusCode == HttpStatusCode.TooManyRequests)
-                    {
-                        return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt + 1));
-                    }
-                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt));
-                },
-                onRetryAsync: async (outcome, timespan, retryAttempt, _) =>
-                {
-                    Log.Warning("Gemini API retry {Attempt} after {Delay}s. Reason: {Reason}", 
-                        retryAttempt, timespan.TotalSeconds, outcome.Result?.StatusCode.ToString() ?? outcome.Exception?.Message);
-                    await Task.CompletedTask;
-                });
+        _httpClientFactory = httpClientFactory;
+        _apiKey = settings.GeminiApiKey;
     }
 
     /// <summary>
@@ -78,9 +59,12 @@ public class GeminiService : IDisposable
     /// Sends a prompt to Google's Gemini API and retrieves the generated text response.
     /// </summary>
     /// <param name="question">The question or prompt to send to the AI.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The AI-generated response or an error message.</returns>
-    public async Task<string> GetAnswerAsync(string question)
+    public async Task<string> GetAnswerAsync(string question, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        
         if (IsRateLimited)
         {
             TimeSpan waitTime;
@@ -91,18 +75,20 @@ public class GeminiService : IDisposable
             if (waitTime > TimeSpan.Zero)
             {
                 Log.Debug("Rate limited. Waiting {WaitTime}s before retry", waitTime.TotalSeconds);
-                await Task.Delay(waitTime);
+                await Task.Delay(waitTime, cancellationToken);
             }
         }
 
-        await _rateLimiter.WaitAsync();
+        await _rateLimiter.WaitAsync(cancellationToken);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            
             var timeSinceLastRequest = DateTime.UtcNow - _lastRequestTime;
             if (timeSinceLastRequest.TotalMilliseconds < MinRequestIntervalMs)
             {
                 var delay = MinRequestIntervalMs - (int)timeSinceLastRequest.TotalMilliseconds;
-                await Task.Delay(delay);
+                await Task.Delay(delay, cancellationToken);
             }
             
             _lastRequestTime = DateTime.UtcNow;
@@ -118,10 +104,10 @@ public class GeminiService : IDisposable
             var json = JsonConvert.SerializeObject(requestBody);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             
-            var response = await _retryPolicy.ExecuteAsync(() => 
-                _httpClient.PostAsync($"{ApiUrl}?key={_apiKey}", content));
+            var httpClient = _httpClientFactory.CreateClient(HttpClientNames.GeminiApi);
+            var response = await httpClient.PostAsync($"{ApiUrl}?key={_apiKey}", content, cancellationToken);
             
-            var responseJson = await response.Content.ReadAsStringAsync();
+            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
 
             if (response.IsSuccessStatusCode)
             {
@@ -147,6 +133,11 @@ public class GeminiService : IDisposable
             Log.Warning("Gemini API request failed with status {StatusCode}", response.StatusCode);
             return $"Error: {response.StatusCode}";
         }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("Gemini API request cancelled");
+            throw;
+        }
         catch (Exception ex)
         {
             Log.Error(ex, "Error executing Gemini API request");
@@ -158,14 +149,13 @@ public class GeminiService : IDisposable
         }
     }
 
-
     /// <summary>
     /// Releases resources used by the service.
+    /// Note: HttpClient is managed by IHttpClientFactory, no need to dispose it manually.
     /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
-        _httpClient.Dispose();
         _rateLimiter.Dispose();
         _disposed = true;
         GC.SuppressFinalize(this);

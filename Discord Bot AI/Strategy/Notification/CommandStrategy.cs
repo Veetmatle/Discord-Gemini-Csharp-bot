@@ -1,4 +1,4 @@
-﻿﻿using Discord_Bot_AI.Services;
+﻿using Discord_Bot_AI.Services;
 using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Data;
 
@@ -11,12 +11,12 @@ public class CommandStrategy : IMatchNotification
 {
     private readonly RiotService _riot;
     private readonly IUserRegistry _userRegistry;
-    private readonly Func<RiotAccount, MatchData, Task> _onMatchFound;
+    private readonly Func<RiotAccount, MatchData, CancellationToken, Task> _onMatchFound;
 
     /// <summary>
     /// Creates a new command strategy instance.
     /// </summary>
-    public CommandStrategy(RiotService riot, IUserRegistry registry, Func<RiotAccount, MatchData, Task> onMatchFound)
+    public CommandStrategy(RiotService riot, IUserRegistry registry, Func<RiotAccount, MatchData, CancellationToken, Task> onMatchFound)
     {
         _riot = riot;
         _userRegistry = registry;
@@ -37,19 +37,24 @@ public class CommandStrategy : IMatchNotification
     /// Checks and retrieves the latest match data for a specific Discord user on demand.
     /// </summary>
     /// <param name="discordId">The Discord user's unique identifier.</param>
-    public async Task CheckUserMatchAsync(ulong discordId)
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    public async Task CheckUserMatchAsync(ulong discordId, CancellationToken cancellationToken = default)
     {
         var account = _userRegistry.GetAccount(discordId);
         if (account == null) return;
 
-        string? currentMatchId = await _riot.GetLatestMatchIdAsync(account.puuid);
+        cancellationToken.ThrowIfCancellationRequested();
+        
+        string? currentMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, cancellationToken);
         
         if (!string.IsNullOrEmpty(currentMatchId))
         {
-            var matchData = await _riot.GetMatchDetailsAsync(currentMatchId);
+            cancellationToken.ThrowIfCancellationRequested();
+            
+            var matchData = await _riot.GetMatchDetailsAsync(currentMatchId, cancellationToken);
             if (matchData != null)
             {
-                await _onMatchFound(account, matchData);
+                await _onMatchFound(account, matchData, cancellationToken);
             }
         }
     }

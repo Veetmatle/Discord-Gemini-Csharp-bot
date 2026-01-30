@@ -13,7 +13,7 @@ public class PollingStrategy : IMatchNotification
 {
     private readonly RiotService _riot;
     private readonly IUserRegistry _userRegistry;
-    private readonly Func<RiotAccount, MatchData, Task> _onNewMatchFound;
+    private readonly Func<RiotAccount, MatchData, CancellationToken, Task> _onNewMatchFound;
     private CancellationTokenSource? _cts;
     
     private static readonly TimeSpan PollingInterval = TimeSpan.FromMinutes(10);
@@ -23,7 +23,7 @@ public class PollingStrategy : IMatchNotification
     /// <summary>
     /// Creates a new polling strategy instance.
     /// </summary>
-    public PollingStrategy(RiotService riot, IUserRegistry userRegistry, Func<RiotAccount, MatchData, Task> onNewMatchFound)
+    public PollingStrategy(RiotService riot, IUserRegistry userRegistry, Func<RiotAccount, MatchData, CancellationToken, Task> onNewMatchFound)
     {
         _riot = riot;
         _userRegistry = userRegistry;
@@ -40,8 +40,6 @@ public class PollingStrategy : IMatchNotification
         try
         {
             using PeriodicTimer timer = new PeriodicTimer(PollingInterval);
-            
-            // Initial check on startup
             await CheckMatchesInternalAsync(_cts.Token);
             
             while (await timer.WaitForNextTickAsync(_cts.Token))
@@ -71,7 +69,6 @@ public class PollingStrategy : IMatchNotification
     /// <summary>
     /// Periodically checks for new matches across all tracked users using parallel processing with a concurrency limit.
     /// </summary>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
     private async Task CheckMatchesInternalAsync(CancellationToken cancellationToken)
     {
         if (_riot.IsRateLimited)
@@ -101,7 +98,6 @@ public class PollingStrategy : IMatchNotification
             
             tasks.Add(ProcessUserWithSemaphoreAsync(semaphore, discordUserId, account, cancellationToken));
             
-            // Small delay between starting each task to spread out requests
             await Task.Delay(DelayBetweenUsers / MaxConcurrentChecks, cancellationToken);
         }
         
@@ -147,7 +143,7 @@ public class PollingStrategy : IMatchNotification
         {
             cancellationToken.ThrowIfCancellationRequested();
             
-            string? currentMatchId = await _riot.GetLatestMatchIdAsync(account.puuid);
+            string? currentMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, cancellationToken);
 
             if (string.IsNullOrEmpty(currentMatchId) || currentMatchId == account.LastMatchId)
             {
@@ -156,15 +152,13 @@ public class PollingStrategy : IMatchNotification
             
             cancellationToken.ThrowIfCancellationRequested();
             
-            await Task.Delay(DelayBetweenUsers, cancellationToken);
-            
-            var matchData = await _riot.GetMatchDetailsAsync(currentMatchId);
+            var matchData = await _riot.GetMatchDetailsAsync(currentMatchId, cancellationToken);
             
             if (matchData != null)
             {
                 _userRegistry.UpdateLastMatchId(discordUserId, currentMatchId);
                 
-                await _onNewMatchFound(account, matchData);
+                await _onNewMatchFound(account, matchData, cancellationToken);
                 
                 Log.Information("New match detected for {PlayerName}: {MatchId}", account.gameName, currentMatchId);
             }

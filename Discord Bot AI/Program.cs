@@ -1,5 +1,7 @@
 ﻿using Discord_Bot_AI.Services;
 using Discord_Bot_AI.Configuration;
+using Discord_Bot_AI.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 
 namespace Discord_Bot_AI;
@@ -7,7 +9,7 @@ namespace Discord_Bot_AI;
 public class Program
 {
     /// <summary>
-    /// Entry point of the application. Initializes logging and starts the bot service.
+    /// Entry point of the application. Initializes DI container, logging and starts the bot service.
     /// </summary>
     static async Task Main()
     {
@@ -23,7 +25,12 @@ public class Program
             
             var settings = AppSettings.FromProvider(configProvider);
             
-            await using var botService = new BotService(settings);
+            // Build DI container with all services
+            var services = new ServiceCollection()
+                .AddApplicationServices(settings)
+                .BuildServiceProvider();
+            
+            await using var botService = new BotService(services);
             await botService.RunAsync();
             
             Log.Information("Discord Bot has exited");

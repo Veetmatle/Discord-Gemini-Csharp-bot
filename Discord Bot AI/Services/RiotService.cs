@@ -1,18 +1,19 @@
 ﻿﻿using Discord_Bot_AI.Models;
+using Discord_Bot_AI.Infrastructure;
 using System.Net;
 using System.Net.Http.Json;
-using Polly;
-using Polly.Retry;
 using Serilog;
 
 namespace Discord_Bot_AI.Services;
 
 /// <summary>
-/// Service for interacting with the Riot Games API with built-in rate limiting and Polly retry policies.
+/// Service for interacting with the Riot Games API with built-in rate limiting.
+/// Uses IHttpClientFactory for proper HTTP client lifecycle management.
+/// Retry policies are configured centrally in ServiceCollectionExtensions.
 /// </summary>
 public class RiotService : IDisposable
 {
-    private readonly HttpClient _httpClient;
+    private readonly IHttpClientFactory _httpClientFactory;
     private const string BaseUrl = "https://europe.api.riotgames.com/riot/account/v1/accounts";
     
     private readonly SemaphoreSlim _rateLimiter = new(1, 1);
@@ -22,39 +23,15 @@ public class RiotService : IDisposable
     private DateTime _backoffUntil = DateTime.MinValue;
     private readonly object _backoffLock = new();
     
-    private readonly AsyncRetryPolicy<HttpResponseMessage> _retryPolicy;
     private bool _disposed;
 
     /// <summary>
-    /// Initializes the Riot service with API key and configures retry policies.
+    /// Initializes the Riot service with IHttpClientFactory for managed HTTP connections.
     /// </summary>
-    /// <param name="apiKey">The Riot API key for authentication.</param>
-    public RiotService(string apiKey)
+    /// <param name="httpClientFactory">Factory for creating HTTP clients.</param>
+    public RiotService(IHttpClientFactory httpClientFactory)
     {
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        _httpClient.DefaultRequestHeaders.Add("X-Riot-Token", apiKey);
-        
-        _retryPolicy = Policy
-            .HandleResult<HttpResponseMessage>(r => r.StatusCode == HttpStatusCode.TooManyRequests || (int)r.StatusCode >= 500)
-            .Or<HttpRequestException>()
-            .Or<TaskCanceledException>()
-            .WaitAndRetryAsync(
-                retryCount: 3,
-                sleepDurationProvider: (retryAttempt, response, _) =>
-                {
-                    if (response.Result?.StatusCode == HttpStatusCode.TooManyRequests)
-                    {
-                        var retryAfter = response.Result.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Pow(2, retryAttempt + 1));
-                        return retryAfter;
-                    }
-                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt));
-                },
-                onRetryAsync: async (outcome, timespan, retryAttempt, _) =>
-                {
-                    Log.Warning("Riot API retry {Attempt} after {Delay}s. Reason: {Reason}", 
-                        retryAttempt, timespan.TotalSeconds, outcome.Result?.StatusCode.ToString() ?? outcome.Exception?.Message);
-                    await Task.CompletedTask;
-                });
+        _httpClientFactory = httpClientFactory;
     }
     
     /// <summary>
@@ -76,23 +53,25 @@ public class RiotService : IDisposable
     /// </summary>
     /// <param name="gameNickName">The player's in-game name.</param>
     /// <param name="tag">The player's tag (e.g., EUNE, PL1).</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The Riot account or null if not found.</returns>
-    public async Task<RiotAccount?> GetAccountAsync(string gameNickName, string tag)
+    public async Task<RiotAccount?> GetAccountAsync(string gameNickName, string tag, CancellationToken cancellationToken = default)
     {
         var url = $"{BaseUrl}/by-riot-id/{gameNickName}/{tag}";
-        return await ExecuteWithRetryAsync<RiotAccount>(url);
+        return await ExecuteWithRateLimitingAsync<RiotAccount>(url, cancellationToken);
     }
 
     /// <summary>
     /// Gets the latest match ID for a given player's PUUID.
     /// </summary>
     /// <param name="puuid">The player's unique identifier.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The latest match ID or null if not found.</returns>
-    public async Task<string?> GetLatestMatchIdAsync(string puuid)
+    public async Task<string?> GetLatestMatchIdAsync(string puuid, CancellationToken cancellationToken = default)
     {
         var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=1";
     
-        var matchIds = await ExecuteWithRetryAsync<List<string>>(url);
+        var matchIds = await ExecuteWithRateLimitingAsync<List<string>>(url, cancellationToken);
         return matchIds?.FirstOrDefault();
     }
     
@@ -100,21 +79,25 @@ public class RiotService : IDisposable
     /// Gets detailed match information based on match ID.
     /// </summary>
     /// <param name="matchId">The unique match identifier.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Detailed match data or null if not found.</returns>
-    public async Task<MatchData?> GetMatchDetailsAsync(string matchId)
+    public async Task<MatchData?> GetMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
     {
         var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/{matchId}";
-        return await ExecuteWithRetryAsync<MatchData>(url);
+        return await ExecuteWithRateLimitingAsync<MatchData>(url, cancellationToken);
     }
 
     /// <summary>
-    /// Executes an HTTP request with rate limiting and Polly retry policy.
+    /// Executes an HTTP request with rate limiting. Retry logic is handled by Polly policies.
     /// </summary>
     /// <typeparam name="T">The expected response type.</typeparam>
     /// <param name="url">The request URL.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Deserialized response or default if failed.</returns>
-    private async Task<T?> ExecuteWithRetryAsync<T>(string url) where T : class
+    private async Task<T?> ExecuteWithRateLimitingAsync<T>(string url, CancellationToken cancellationToken) where T : class
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        
         if (IsRateLimited)
         {
             TimeSpan waitTime;
@@ -125,27 +108,30 @@ public class RiotService : IDisposable
             if (waitTime > TimeSpan.Zero)
             {
                 Log.Debug("Rate limited. Waiting {WaitTime}s before retry", waitTime.TotalSeconds);
-                await Task.Delay(waitTime);
+                await Task.Delay(waitTime, cancellationToken);
             }
         }
-
-        await _rateLimiter.WaitAsync();
+        
+        await _rateLimiter.WaitAsync(cancellationToken);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            
             var timeSinceLastRequest = DateTime.UtcNow - _lastRequestTime;
             if (timeSinceLastRequest.TotalMilliseconds < MinRequestIntervalMs)
             {
                 var delay = MinRequestIntervalMs - (int)timeSinceLastRequest.TotalMilliseconds;
-                await Task.Delay(delay);
+                await Task.Delay(delay, cancellationToken);
             }
             
             _lastRequestTime = DateTime.UtcNow;
             
-            var response = await _retryPolicy.ExecuteAsync(() => _httpClient.GetAsync(url));
+            var httpClient = _httpClientFactory.CreateClient(HttpClientNames.RiotApi);
+            var response = await httpClient.GetAsync(url, cancellationToken);
 
             if (response.IsSuccessStatusCode)
             {
-                return await response.Content.ReadFromJsonAsync<T>();
+                return await response.Content.ReadFromJsonAsync<T>(cancellationToken);
             }
 
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
@@ -166,6 +152,11 @@ public class RiotService : IDisposable
             Log.Warning("Riot API request failed with status {StatusCode}", response.StatusCode);
             return null;
         }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("Riot API request cancelled");
+            throw;
+        }
         catch (Exception ex)
         {
             Log.Error(ex, "Error executing Riot API request to {Url}", url);
@@ -177,14 +168,13 @@ public class RiotService : IDisposable
         }
     }
 
-
     /// <summary>
     /// Releases resources used by the service.
+    /// Note: HttpClient is managed by IHttpClientFactory, no need to dispose it manually.
     /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
-        _httpClient.Dispose();
         _rateLimiter.Dispose();
         _disposed = true;
         GC.SuppressFinalize(this);
