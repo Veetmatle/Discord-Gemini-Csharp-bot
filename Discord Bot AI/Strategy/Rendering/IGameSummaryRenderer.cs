@@ -1,4 +1,4 @@
-﻿﻿namespace Discord_Bot_AI.Strategy.Rendering;
+﻿namespace Discord_Bot_AI.Strategy.Rendering;
 
 using Models;
 

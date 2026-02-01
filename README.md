@@ -63,7 +63,6 @@ docker compose down
 | DISCORD_TOKEN | Yes | Discord bot token |
 | GEMINI_API_KEY | Yes | Google Gemini API key |
 | RIOT_TOKEN | Yes | Riot Games API key |
-| SERVER_IDS | Yes | Comma-separated Discord server IDs |
 | RIOT_VERSION | No | Data Dragon version (default: 14.2.1) |
 | DATA_PATH | No | User data directory (default: /app/data) |
 | CACHE_PATH | No | Image cache directory (default: /app/cache) |
@@ -108,6 +107,36 @@ Discord Bot AI/
 ---
 
 ## Key Technical Features
+
+### 0. Dynamic Guild Management
+
+The bot automatically manages guilds without requiring manual configuration:
+
+#### Auto-Discovery
+- No need to configure SERVER_IDS in .env
+- Bot automatically registers slash commands when:
+  - Starting up (for all connected guilds via _client.Guilds)
+  - Joining a new guild (via JoinedGuild event)
+- Bot cleans up guild configuration when leaving (via LeftGuild event)
+
+#### Targeted Notifications
+- Each RiotAccount stores RegisteredGuildId from the registration command
+- Match notifications are sent only to the guild where the account was registered
+- No cross-server spam
+
+#### Dynamic Channel Configuration
+- Administrators use /laskbot setup-channel to set notification channel
+- Channel ID stored in guilds.json (persisted via UserRegistry)
+- No hardcoded channel names
+
+#### Slash Commands
+| Command | Description |
+|---------|-------------|
+| /laskbot register nick:X tag:Y | Register LoL account (stores guild ID) |
+| /laskbot unregister | Remove account registration |
+| /laskbot setup-channel channel:X | Set notification channel (Admin only) |
+| /laskbot ask query:X | Ask Gemini AI a question |
+| /laskbot info | Show bot information |
 
 ### 1. Dependency Injection (Microsoft.Extensions.DependencyInjection)
 

@@ -1,4 +1,4 @@
-﻿﻿using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Discord_Bot_AI.Models;
 using Serilog;
 
@@ -28,15 +28,33 @@ public class UserRegistry : IUserRegistry
     }
 
     /// <summary>
-    /// Registers or updates a Riot account for a Discord user.
+    /// Registers a Riot account for a Discord user on a specific guild.
+    /// If the account already exists, adds the guild to the list of registered guilds.
     /// </summary>
-    public void RegisterUser(ulong discordUserId, RiotAccount account)
+    /// <param name="discordUserId">The Discord user's unique identifier.</param>
+    /// <param name="account">The Riot account to register (used only for new registrations).</param>
+    /// <param name="guildId">The guild ID where registration is happening.</param>
+    public void RegisterUser(ulong discordUserId, RiotAccount account, ulong guildId)
     {
         _lock.EnterWriteLock();
         try
         {
-            _userMap[discordUserId] = account;
-            SaveInternal();
+            if (_userMap.TryGetValue(discordUserId, out var existingAccount))
+            {
+                if (!existingAccount.RegisteredGuildIds.Contains(guildId))
+                {
+                    existingAccount.RegisteredGuildIds.Add(guildId);
+                    SaveInternal();
+                    Log.Information("Added guild {GuildId} to existing account {PlayerName}", guildId, existingAccount.gameName);
+                }
+            }
+            else
+            {
+                account.RegisteredGuildIds = new List<ulong> { guildId };
+                _userMap[discordUserId] = account;
+                SaveInternal();
+                Log.Information("Registered new account {PlayerName} for guild {GuildId}", account.gameName, guildId);
+            }
         }
         finally
         {
@@ -67,21 +85,39 @@ public class UserRegistry : IUserRegistry
     }
     
     /// <summary>
-    /// Removes a user's Riot account registration.
+    /// Removes a user's registration from a specific guild.
+    /// If no guilds remain, removes the account entirely.
     /// </summary>
     /// <param name="discordUserId">The Discord user's unique identifier.</param>
-    /// <returns>True if the account was found and removed, false otherwise.</returns>
-    public bool RemoveUser(ulong discordUserId)
+    /// <param name="guildId">The guild ID to remove from registration.</param>
+    /// <returns>True if the guild was removed from registration, false if not found.</returns>
+    public bool RemoveUserFromGuild(ulong discordUserId, ulong guildId)
     {
         _lock.EnterWriteLock();
         try
         {
-            if (_userMap.Remove(discordUserId))
+            if (!_userMap.TryGetValue(discordUserId, out var account))
             {
-                SaveInternal(); 
-                return true;
+                return false;
             }
-            return false;
+
+            if (!account.RegisteredGuildIds.Remove(guildId))
+            {
+                return false;
+            }
+
+            if (account.RegisteredGuildIds.Count == 0)
+            {
+                _userMap.Remove(discordUserId);
+                Log.Information("Removed account {PlayerName} entirely - no guilds remaining", account.gameName);
+            }
+            else
+            {
+                Log.Information("Removed guild {GuildId} from account {PlayerName}", guildId, account.gameName);
+            }
+
+            SaveInternal();
+            return true;
         }
         finally
         {
@@ -148,6 +184,7 @@ public class UserRegistry : IUserRegistry
             Log.Information("Loaded {Count} users from registry", _userMap.Count);
         }
     }
+
 
     /// <summary>
     /// Releases resources used by the registry.

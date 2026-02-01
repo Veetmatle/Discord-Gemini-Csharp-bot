@@ -1,4 +1,4 @@
-﻿﻿using Discord_Bot_AI.Services;
+﻿using Discord_Bot_AI.Services;
 using Discord_Bot_AI.Data;
 using Discord_Bot_AI.Models;
 using Serilog;

@@ -25,7 +25,6 @@ public class Program
             
             var settings = AppSettings.FromProvider(configProvider);
             
-            // Build DI container with all services
             var services = new ServiceCollection()
                 .AddApplicationServices(settings)
                 .BuildServiceProvider();

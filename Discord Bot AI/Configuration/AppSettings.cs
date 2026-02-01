@@ -9,7 +9,6 @@ public sealed class AppSettings
     public string GeminiApiKey { get; init; } = string.Empty;
     public string RiotToken { get; init; } = string.Empty;
     public string RiotVersion { get; init; } = string.Empty;
-    public List<string> ServerIds { get; init; } = new();
     public string DataPath { get; init; } = "/app/data";
     public string CachePath { get; init; } = "/app/cache";
     public string LogPath { get; init; } = "/app/logs";
@@ -24,7 +23,6 @@ public sealed class AppSettings
             GeminiApiKey = provider.GetRequiredValue("GEMINI_API_KEY"),
             RiotToken = provider.GetRequiredValue("RIOT_TOKEN"),
             RiotVersion = provider.GetValue("RIOT_VERSION") ?? "14.2.1",
-            ServerIds = provider.GetValueAsList("SERVER_IDS"),
             DataPath = provider.GetValue("DATA_PATH") ?? "/app/data",
             CachePath = provider.GetValue("CACHE_PATH") ?? "/app/cache",
             LogPath = provider.GetValue("LOG_PATH") ?? "/app/logs"

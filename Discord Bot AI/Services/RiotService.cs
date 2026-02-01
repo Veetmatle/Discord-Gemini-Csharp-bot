@@ -1,4 +1,4 @@
-﻿﻿using Discord_Bot_AI.Models;
+﻿using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Infrastructure;
 using System.Net;
 using System.Net.Http.Json;

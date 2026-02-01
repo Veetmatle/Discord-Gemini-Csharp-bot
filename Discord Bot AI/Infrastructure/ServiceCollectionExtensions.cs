@@ -1,4 +1,4 @@
-﻿using System.Net;
+﻿﻿using System.Net;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Data;
 using Discord_Bot_AI.Services;
@@ -29,6 +29,7 @@ public static class ServiceCollectionExtensions
         
         // Register core services
         services.AddSingleton<IUserRegistry>(_ => new UserRegistry(settings.DataPath));
+        services.AddSingleton<IGuildConfigRegistry>(_ => new GuildConfigRegistry(settings.DataPath));
         services.AddSingleton<RiotImageCacheService>(_ => new RiotImageCacheService(settings.RiotVersion, settings.CachePath));
         services.AddSingleton<IGameSummaryRenderer, ImageSharpRenderer>();
         

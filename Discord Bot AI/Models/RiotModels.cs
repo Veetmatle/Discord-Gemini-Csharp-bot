@@ -1,11 +1,31 @@
 ﻿namespace Discord_Bot_AI.Models;
 
+/// <summary>
+/// Represents a Riot Games account linked to a Discord user.
+/// </summary>
 public class RiotAccount
 {
     public string puuid { get; set; }
     public string gameName { get; set; }
     public string tagLine { get; set; }
     public string? LastMatchId { get; set; }
+    
+    /// <summary>
+    /// List of Discord Guild (server) IDs where this account is registered.
+    /// Allows the same account to receive notifications on multiple servers.
+    /// </summary>
+    public List<ulong> RegisteredGuildIds { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for a Discord Guild (server), storing the notification channel ID.
+/// </summary>
+public class GuildConfig
+{
+    /// <summary>
+    /// The text channel ID where match notifications will be sent.
+    /// </summary>
+    public ulong NotificationChannelId { get; set; }
 }
 
 public class MatchData

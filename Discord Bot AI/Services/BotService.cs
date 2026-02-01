@@ -1,4 +1,4 @@
-﻿﻿using Discord_Bot_AI.Data;
+﻿using Discord_Bot_AI.Data;
 using Discord;
 using Discord.WebSocket;
 using Discord_Bot_AI.Models;
@@ -24,7 +24,7 @@ public class BotService : IAsyncDisposable
     private readonly RiotImageCacheService _imageCache;
     private readonly IGameSummaryRenderer _renderer;
     private readonly IUserRegistry _userRegistry;
-    private readonly List<ulong> _guildIds = new();
+    private readonly IGuildConfigRegistry _guildConfigRegistry;
     private readonly List<IMatchNotification> _notificationStrategies = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private DateTime _startTime;
@@ -43,12 +43,15 @@ public class BotService : IAsyncDisposable
         _imageCache = serviceProvider.GetRequiredService<RiotImageCacheService>();
         _renderer = serviceProvider.GetRequiredService<IGameSummaryRenderer>();
         _userRegistry = serviceProvider.GetRequiredService<IUserRegistry>();
+        _guildConfigRegistry = serviceProvider.GetRequiredService<IGuildConfigRegistry>();
         
         var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent };
         _client = new DiscordSocketClient(config);
         _client.Ready += OnReadyAsync;
         _client.SlashCommandExecuted += OnSlashCommandAsync;
         _client.Log += OnDiscordLogAsync;
+        _client.JoinedGuild += OnJoinedGuildAsync;
+        _client.LeftGuild += OnLeftGuildAsync;
     }
 
     /// <summary>
@@ -61,7 +64,6 @@ public class BotService : IAsyncDisposable
         ValidateSettings();
 
         InitializeNotificationStrategies();
-        ParseGuildIds();
 
         RegisterShutdownHandlers();
 
@@ -96,8 +98,6 @@ public class BotService : IAsyncDisposable
             errors.Add("GEMINI_API_KEY is required");
         if (string.IsNullOrWhiteSpace(_settings.RiotToken))
             errors.Add("RIOT_TOKEN is required");
-        if (_settings.ServerIds.Count == 0)
-            errors.Add("SERVER_IDS is required (comma-separated)");
             
         if (errors.Count > 0)
         {
@@ -190,20 +190,6 @@ public class BotService : IAsyncDisposable
         Log.Information("Notification strategies initialized: {Count}", _notificationStrategies.Count);
     }
 
-    /// <summary>
-    /// Parses guild IDs from configuration.
-    /// </summary>
-    private void ParseGuildIds()
-    {
-        foreach (var id in _settings.ServerIds)
-        {
-            if (ulong.TryParse(id, out ulong guildId))
-            {
-                _guildIds.Add(guildId);
-            }
-        }
-    }
-
     private async Task StartDiscordClientAsync()
     {
         await _client.LoginAsync(TokenType.Bot, _settings.DiscordToken);
@@ -218,7 +204,42 @@ public class BotService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Called when the bot joins a new guild. Registers slash commands for that guild.
+    /// </summary>
+    private async Task OnJoinedGuildAsync(SocketGuild guild)
+    {
+        Log.Information("Joined guild: {GuildName} ({GuildId})", guild.Name, guild.Id);
+        await RegisterCommandsForGuildAsync(guild);
+    }
+
+    /// <summary>
+    /// Called when the bot leaves a guild. Cleans up guild configuration.
+    /// </summary>
+    private Task OnLeftGuildAsync(SocketGuild guild)
+    {
+        Log.Information("Left guild: {GuildName} ({GuildId})", guild.Name, guild.Id);
+        _guildConfigRegistry.RemoveGuild(guild.Id);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Called when the Discord client is ready. Registers commands for all connected guilds.
+    /// </summary>
     private async Task OnReadyAsync()
+    {
+        Log.Information("Bot is ready. Connected to {GuildCount} guilds", _client.Guilds.Count);
+        
+        foreach (var guild in _client.Guilds)
+        {
+            await RegisterCommandsForGuildAsync(guild);
+        }
+    }
+
+    /// <summary>
+    /// Registers slash commands for a specific guild.
+    /// </summary>
+    private async Task RegisterCommandsForGuildAsync(SocketGuild guild)
     {
         var command = new SlashCommandBuilder()
             .WithName("laskbot")
@@ -242,23 +263,21 @@ public class BotService : IAsyncDisposable
                 .WithType(ApplicationCommandOptionType.SubCommand)
                 .AddOption("nick", ApplicationCommandOptionType.String, "Your nick in game", isRequired: true)
                 .AddOption("tag", ApplicationCommandOptionType.String, "Your tag (eg. EUNE, PL1)", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("setup-channel")
+                .WithDescription("Set the notification channel for match results (Admin only)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("channel", ApplicationCommandOptionType.Channel, "The channel for notifications", isRequired: true))
             .Build();
 
-        foreach (var id in _guildIds)
+        try
         {
-            var guild = _client.GetGuild(id);
-            if (guild != null)
-            {
-                try
-                {
-                    await guild.CreateApplicationCommandAsync(command);
-                    Console.WriteLine($"Registered for {guild.Name}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error on {id}: {ex.Message}");
-                }
-            }
+            await guild.CreateApplicationCommandAsync(command);
+            Log.Debug("Registered commands for guild: {GuildName}", guild.Name);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to register commands for guild {GuildId}", guild.Id);
         }
     }
 
@@ -281,20 +300,40 @@ public class BotService : IAsyncDisposable
             case "unregister":
                 await UnregisterRiotAccountAsync(command);
                 break;
+            case "setup-channel":
+                await SetupNotificationChannelAsync(command, subCommand);
+                break;
         }
     }
     
     private async Task UnregisterRiotAccountAsync(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
-        bool removed = _userRegistry.RemoveUser(command.User.Id);
+        
+        var guildId = command.GuildId;
+        if (guildId == null)
+        {
+            await command.FollowupAsync("This command must be used in a server.");
+            return;
+        }
+        
+        var account = _userRegistry.GetAccount(command.User.Id);
+        bool removed = _userRegistry.RemoveUserFromGuild(command.User.Id, guildId.Value);
+        
         if (removed)
         {
-            await command.FollowupAsync("Your account has been unregistered successfully.");
+            if (account != null && account.RegisteredGuildIds.Count > 1)
+            {
+                await command.FollowupAsync($"Your account **{account.gameName}** has been unregistered from this server. You are still tracked on {account.RegisteredGuildIds.Count - 1} other server(s).");
+            }
+            else
+            {
+                await command.FollowupAsync("Your account has been completely unregistered.");
+            }
         }
         else
         {
-            await command.FollowupAsync("No corresponding account found to unregister.");
+            await command.FollowupAsync("You are not registered on this server.");
         }
     }
 
@@ -323,11 +362,33 @@ public class BotService : IAsyncDisposable
             return;
         }
         
+        var guildId = command.GuildId;
+        if (guildId == null)
+        {
+            await command.FollowupAsync("This command must be used in a server, not in DMs.");
+            return;
+        }
+        
+        var existingAccount = _userRegistry.GetAccount(command.User.Id);
+        
+        if (existingAccount != null)
+        {
+            if (existingAccount.RegisteredGuildIds.Contains(guildId.Value))
+            {
+                await command.FollowupAsync($"You are already registered on this server with account **{existingAccount.gameName}#{existingAccount.tagLine}**.");
+                return;
+            }
+            
+            _userRegistry.RegisterUser(command.User.Id, existingAccount, guildId.Value);
+            await command.FollowupAsync($"Your account **{existingAccount.gameName}#{existingAccount.tagLine}** is now also tracked on this server.");
+            return;
+        }
+        
         var account = await _riot.GetAccountAsync(nick, tag, _shutdownCts.Token);
         if (account != null)
         {
             account.LastMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, _shutdownCts.Token);
-            _userRegistry.RegisterUser(command.User.Id, account);
+            _userRegistry.RegisterUser(command.User.Id, account, guildId.Value);
             await command.FollowupAsync($"Account registered: **{account.gameName}#{account.tagLine}**.");
         }
         else
@@ -337,27 +398,111 @@ public class BotService : IAsyncDisposable
     }
     
     /// <summary>
-    /// Method to notify a Discord channel when a match is finished.
+    /// Sets up the notification channel for a guild. Requires administrator permissions.
+    /// </summary>
+    private async Task SetupNotificationChannelAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
+    {
+        var guildUser = command.User as SocketGuildUser;
+        if (guildUser == null || !guildUser.GuildPermissions.Administrator)
+        {
+            await command.RespondAsync("You need Administrator permissions to use this command.", ephemeral: true);
+            return;
+        }
+
+        var channelOption = subCommand.Options.FirstOrDefault(o => o.Name == "channel");
+        if (channelOption?.Value is not ITextChannel textChannel)
+        {
+            await command.RespondAsync("Please select a valid text channel.", ephemeral: true);
+            return;
+        }
+
+        var guildId = command.GuildId;
+        if (guildId == null)
+        {
+            await command.RespondAsync("This command must be used in a server.", ephemeral: true);
+            return;
+        }
+
+        _guildConfigRegistry.SetNotificationChannel(guildId.Value, textChannel.Id);
+        await command.RespondAsync($"Notification channel set to <#{textChannel.Id}>. Match results will be posted there.", ephemeral: true);
+        Log.Information("Guild {GuildId} notification channel set to {ChannelId}", guildId.Value, textChannel.Id);
+    }
+    
+    /// <summary>
+    /// Sends match notification to all guilds where the account is registered.
+    /// Renders the image once and sends it to all configured notification channels.
     /// </summary>
     /// <param name="account">The Riot account of the player.</param>
     /// <param name="matchData">The match data to display.</param>
     /// <param name="ct">Cancellation token to cancel the operation.</param>
     private async Task NotifyMatchFinishedAsync(RiotAccount account, MatchData matchData, CancellationToken ct = default)
     {
-        var guild = _client.GetGuild(_guildIds.FirstOrDefault()); 
-        var channel = guild?.TextChannels.FirstOrDefault(c => c.Name == "bot"); 
-
-        if (channel != null)
+        if (account.RegisteredGuildIds.Count == 0)
         {
+            Log.Warning("Account {PlayerName} has no registered guilds", account.gameName);
+            return;
+        }
+
+        byte[]? imageData = null;
+        
+        try
+        {
+            using var imageStream = await _renderer.RenderSummaryAsync(account, matchData, ct);
+            using var memoryStream = new MemoryStream();
+            await imageStream.CopyToAsync(memoryStream, ct);
+            imageData = memoryStream.ToArray();
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("Match notification cancelled during rendering");
+            return;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to render match summary for {PlayerName}", account.gameName);
+            return;
+        }
+
+        foreach (var guildId in account.RegisteredGuildIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            var guild = _client.GetGuild(guildId);
+            if (guild == null)
+            {
+                Log.Warning("Guild {GuildId} not found for account {PlayerName}", guildId, account.gameName);
+                continue;
+            }
+
+            var channelId = _guildConfigRegistry.GetNotificationChannel(guildId);
+            if (!channelId.HasValue)
+            {
+                Log.Warning("Notification channel not configured for guild {GuildName}. Use /laskbot setup-channel to configure.", guild.Name);
+                continue;
+            }
+
+            var channel = guild.GetTextChannel(channelId.Value);
+            if (channel == null)
+            {
+                Log.Warning("Channel {ChannelId} not found in guild {GuildName}", channelId.Value, guild.Name);
+                continue;
+            }
+
             try
             {
-                using var imageStream = await _renderer.RenderSummaryAsync(account, matchData, ct);
-                await channel.SendFileAsync(imageStream, "match.png", $"**{account.gameName}** finished a match!",
+                using var sendStream = new MemoryStream(imageData);
+                await channel.SendFileAsync(sendStream, "match.png", $"**{account.gameName}** finished a match!",
                     options: new RequestOptions { CancelToken = ct });
+                Log.Debug("Sent match notification to guild {GuildName}", guild.Name);
             }
             catch (OperationCanceledException)
             {
-                Log.Debug("Match notification cancelled during shutdown");
+                Log.Debug("Match notification cancelled during send to guild {GuildId}", guildId);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to send match notification to guild {GuildName}", guild.Name);
             }
         }
     }
@@ -383,6 +528,9 @@ public class BotService : IAsyncDisposable
         
         if (_userRegistry is IDisposable registryDisposable)
             registryDisposable.Dispose();
+        
+        if (_guildConfigRegistry is IDisposable guildConfigDisposable)
+            guildConfigDisposable.Dispose();
         
         await _client.DisposeAsync();
         

@@ -1,4 +1,4 @@
-﻿﻿namespace Discord_Bot_AI.Strategy.Notification;
+﻿namespace Discord_Bot_AI.Strategy.Notification;
 
 /// <summary>
 /// Interface defining the contract for match notification strategies.
