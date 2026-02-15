@@ -16,8 +16,9 @@ public class PollingStrategy : IMatchNotification
     private readonly Func<RiotAccount, MatchData, CancellationToken, Task> _onNewMatchFound;
     private CancellationTokenSource? _cts;
     
-    private static readonly TimeSpan PollingInterval = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan DelayBetweenUsers = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan PollingInterval = TimeSpan.FromMinutes(7);
+    private static readonly TimeSpan DelayBetweenUsers = TimeSpan.FromMilliseconds(1100);
+    private static readonly TimeSpan InitialStartupDelay = TimeSpan.FromSeconds(15);
     private const int MaxConcurrentChecks = 3;
 
     /// <summary>
@@ -39,6 +40,10 @@ public class PollingStrategy : IMatchNotification
         
         try
         {
+            Log.Information("Polling strategy starting. Waiting {Delay}s before first check...", 
+                InitialStartupDelay.TotalSeconds);
+            await Task.Delay(InitialStartupDelay, _cts.Token);
+            
             using PeriodicTimer timer = new PeriodicTimer(PollingInterval);
             await CheckMatchesInternalAsync(_cts.Token);
             

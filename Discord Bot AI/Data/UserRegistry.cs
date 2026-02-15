@@ -83,6 +83,32 @@ public class UserRegistry : IUserRegistry
             _lock.ExitWriteLock();
         }
     }
+
+    /// <summary>
+    /// Updates the PUUID for an existing account. Used for API key migration.
+    /// </summary>
+    /// <param name="discordUserId">The Discord user's unique identifier.</param>
+    /// <param name="newPuuid">The new PUUID obtained with current API key.</param>
+    public void UpdateAccountPuuid(ulong discordUserId, string newPuuid)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            if (_userMap.TryGetValue(discordUserId, out var account))
+            {
+                var oldPuuid = account.puuid;
+                account.puuid = newPuuid;
+                account.LastMatchId = null; 
+                SaveInternal();
+                Log.Information("Migrated PUUID for {PlayerName}: {OldPuuid} -> {NewPuuid}", 
+                    account.gameName, oldPuuid[..10] + "...", newPuuid[..10] + "...");
+            }
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
     
     /// <summary>
     /// Removes a user's registration from a specific guild.

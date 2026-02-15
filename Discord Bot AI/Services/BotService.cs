@@ -69,6 +69,8 @@ public class BotService : IAsyncDisposable
 
         await StartDiscordClientAsync();
         
+        await MigrateUserPuuidsAsync();
+        
         StartBackgroundMonitoring();
         
         Log.Information("Bot started successfully. Uptime tracking started.");
@@ -107,6 +109,57 @@ public class BotService : IAsyncDisposable
         }
         
         Log.Information("Configuration validated successfully");
+    }
+
+    /// <summary>
+    /// Migrates user PUUIDs after API key change. Riot encrypts PUUIDs per API key,
+    /// so after changing to a new key, all existing PUUIDs must be refreshed.
+    /// </summary>
+    private async Task MigrateUserPuuidsAsync()
+    {
+        var users = _userRegistry.GetAllTrackedUsers();
+        if (users.Count == 0)
+            return;
+        
+        int migrated = 0;
+        int failed = 0;
+
+        foreach (var entry in users)
+        {
+            var discordUserId = entry.Key;
+            var account = entry.Value;
+
+            try
+            {
+                var refreshedAccount = await _riot.GetAccountAsync(account.gameName, account.tagLine, _shutdownCts.Token);
+                
+                if (refreshedAccount != null && refreshedAccount.puuid != account.puuid)
+                {
+                    _userRegistry.UpdateAccountPuuid(discordUserId, refreshedAccount.puuid);
+                    migrated++;
+                }
+                else if (refreshedAccount == null)
+                {
+                    Log.Warning("Could not refresh account {GameName}#{Tag} - account may no longer exist", 
+                        account.gameName, account.tagLine);
+                    failed++;
+                }
+                
+                await Task.Delay(1500, _shutdownCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Warning("PUUID migration cancelled");
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error migrating PUUID for {GameName}", account.gameName);
+                failed++;
+            }
+        }
+
+        Log.Information("PUUID migration completed: {Migrated} migrated, {Failed} failed", migrated, failed);
     }
 
     /// <summary>
@@ -316,35 +369,60 @@ public class BotService : IAsyncDisposable
         }
     }
 
-    private async Task OnSlashCommandAsync(SocketSlashCommand command)
+    /// <summary>
+    /// Handles incoming slash commands. Offloads processing to a background task to avoid blocking the gateway.
+    /// </summary>
+    private Task OnSlashCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name != "laskbot") return;
+        if (command.Data.Name != "laskbot") return Task.CompletedTask;
         
-        var subCommand = command.Data.Options.First();
-        switch (subCommand.Name)
+        _ = Task.Run(async () =>
         {
-            case "ask":
-                await HandleAskCommandAsync(command, subCommand); 
-                break;
-            case "info":
-                await command.RespondAsync("LaskBot -> v1. Created by Lask.");
-                break;
-            case "register":
-                await RegisterRiotAccountAsync(command, subCommand); 
-                break;
-            case "unregister":
-                await UnregisterRiotAccountAsync(command);
-                break;
-            case "setup-channel":
-                await SetupNotificationChannelAsync(command, subCommand);
-                break;
-            case "status":
-                await ShowStatusAsync(command);
-                break;
-            case "check-latest-match":
-                await CheckLatestMatchAsync(command);
-                break;
-        }
+            try
+            {
+                var subCommand = command.Data.Options.First();
+                switch (subCommand.Name)
+                {
+                    case "ask":
+                        await HandleAskCommandAsync(command, subCommand); 
+                        break;
+                    case "info":
+                        await command.RespondAsync("LaskBot -> v1. Created by Lask.");
+                        break;
+                    case "register":
+                        await RegisterRiotAccountAsync(command, subCommand); 
+                        break;
+                    case "unregister":
+                        await UnregisterRiotAccountAsync(command);
+                        break;
+                    case "setup-channel":
+                        await SetupNotificationChannelAsync(command, subCommand);
+                        break;
+                    case "status":
+                        await ShowStatusAsync(command);
+                        break;
+                    case "check-latest-match":
+                        await CheckLatestMatchAsync(command);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error handling slash command {CommandName}", command.Data.Name);
+                try
+                {
+                    if (!command.HasResponded)
+                    {
+                        await command.RespondAsync("An error occurred while processing your command.", ephemeral: true);
+                    }
+                }
+                catch
+                {
+                }
+            }
+        });
+        
+        return Task.CompletedTask;
     }
     
     private async Task UnregisterRiotAccountAsync(SocketSlashCommand command)

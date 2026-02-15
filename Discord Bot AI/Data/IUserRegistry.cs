@@ -9,6 +9,7 @@ public interface IUserRegistry : IDisposable
 {
     void RegisterUser(ulong discordUserId, RiotAccount account, ulong guildId);
     void UpdateLastMatchId(ulong discordUserId, string lastMatchId);
+    void UpdateAccountPuuid(ulong discordUserId, string newPuuid);
     bool RemoveUserFromGuild(ulong discordUserId, ulong guildId);
     RiotAccount? GetAccount(ulong discordUserId);
     List<KeyValuePair<ulong, RiotAccount>> GetAllTrackedUsers();

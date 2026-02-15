@@ -45,10 +45,13 @@ public static class ServiceCollectionExtensions
     /// </summary>
     private static void AddRiotHttpClient(this IServiceCollection services, AppSettings settings)
     {
+        Log.Information("Token length: {Length}", settings.RiotToken?.Length);
+        var cleanToken = settings.RiotToken?.Trim();
+        
         services.AddHttpClient(HttpClientNames.RiotApi, client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(30);
-                client.DefaultRequestHeaders.Add("X-Riot-Token", settings.RiotToken);
+                client.DefaultRequestHeaders.Add("X-Riot-Token", cleanToken);
             })
             .AddPolicyHandler(GetRetryPolicy("Riot"));
     }

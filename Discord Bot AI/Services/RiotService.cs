@@ -47,7 +47,7 @@ public class RiotService : IDisposable
             }
         }
     }
-    
+
     /// <summary>
     /// Retrieves Riot Account information based on in-game nickname and tag.
     /// </summary>
@@ -55,10 +55,16 @@ public class RiotService : IDisposable
     /// <param name="tag">The player's tag (e.g., EUNE, PL1).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The Riot account or null if not found.</returns>
-    public async Task<RiotAccount?> GetAccountAsync(string gameNickName, string tag, CancellationToken cancellationToken = default)
+    public async Task<RiotAccount?> GetAccountAsync(string gameNickName, string tag,
+        CancellationToken cancellationToken = default)
     {
-        var url = $"{BaseUrl}/by-riot-id/{gameNickName}/{tag}";
-        return await ExecuteWithRateLimitingAsync<RiotAccount>(url, cancellationToken);
+        var encodedName = Uri.EscapeDataString(gameNickName);
+        var encodedTag = Uri.EscapeDataString(tag);
+        var url = $"{BaseUrl}/by-riot-id/{encodedName}/{encodedTag}";
+        var account = await ExecuteWithRateLimitingAsync<RiotAccount>(url, cancellationToken);
+        Log.Information("Account lookup for {GameNickName}#{Tag} returned: {Account}", gameNickName, tag, account != null ? account.puuid : "null");
+        
+        return account;
     }
 
     /// <summary>
@@ -69,7 +75,8 @@ public class RiotService : IDisposable
     /// <returns>The latest match ID or null if not found.</returns>
     public async Task<string?> GetLatestMatchIdAsync(string puuid, CancellationToken cancellationToken = default)
     {
-        var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=1";
+        var encodedPuuid = Uri.EscapeDataString(puuid);
+        var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{encodedPuuid}/ids?start=0&count=1";
     
         var matchIds = await ExecuteWithRateLimitingAsync<List<string>>(url, cancellationToken);
         return matchIds?.FirstOrDefault();
@@ -83,7 +90,8 @@ public class RiotService : IDisposable
     /// <returns>Detailed match data or null if not found.</returns>
     public async Task<MatchData?> GetMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
     {
-        var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/{matchId}";
+        var encodedMatchId = Uri.EscapeDataString(matchId);
+        var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/{encodedMatchId}";
         return await ExecuteWithRateLimitingAsync<MatchData>(url, cancellationToken);
     }
 
@@ -146,6 +154,25 @@ public class RiotService : IDisposable
 
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
+                return null;
+            }
+            
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                Log.Error("Riot API returned Unauthorized (401). Check if RIOT_TOKEN is valid and not expired");
+                return null;
+            }
+            
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                Log.Error("Riot API returned Forbidden (403). The API key may lack required permissions");
+                return null;
+            }
+            
+            if (response.StatusCode == HttpStatusCode.BadRequest)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                Log.Error("Riot API returned BadRequest (400). URL: {Url}, Response: {Error}", url, errorContent);
                 return null;
             }
 
