@@ -1,24 +1,24 @@
 ﻿using System.Net;
-using System.Text;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Infrastructure;
-using Discord_Bot_AI.Models.Gemini;
-using Newtonsoft.Json;
+using Discord_Bot_AI.Models;
+using Mscc.GenerativeAI;
+using Mscc.GenerativeAI.Types;
 using Serilog;
 
 namespace Discord_Bot_AI.Services;
 
 /// <summary>
-/// Service for interacting with Google's Gemini AI API with rate limiting.
-/// Uses IHttpClientFactory for proper HTTP client lifecycle management.
-/// Retry policies are configured centrally in ServiceCollectionExtensions.
+/// Service for interacting with Google's Gemini AI API using the Mscc.GenerativeAI library.
+/// Supports text prompts, images, and document attachments with rate limiting protection.
 /// </summary>
 public class GeminiService : IDisposable
 {
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly string _apiKey;
-    private const string ApiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-    private readonly string _promptPrefix =
+    private readonly GenerativeModel _model;
+    
+    private const string ModelName = "gemini-2.5-flash";
+    private readonly string _promptSuffix =
         "\n Answer in Polish in max 100 words. Be brief and precise unless instructions say otherwise.";
     
     private readonly SemaphoreSlim _rateLimiter = new(1, 1);
@@ -31,14 +31,13 @@ public class GeminiService : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Initializes the Gemini service with IHttpClientFactory for managed HTTP connections.
+    /// Initializes the Gemini service with the Mscc.GenerativeAI SDK.
     /// </summary>
-    /// <param name="httpClientFactory">Factory for creating HTTP clients.</param>
-    /// <param name="settings">Application settings containing API key.</param>
     public GeminiService(IHttpClientFactory httpClientFactory, AppSettings settings)
     {
         _httpClientFactory = httpClientFactory;
-        _apiKey = settings.GeminiApiKey;
+        var googleAi = new GoogleAI(settings.GeminiApiKey);
+        _model = googleAi.GenerativeModel(model: ModelName);
     }
 
     /// <summary>
@@ -56,12 +55,18 @@ public class GeminiService : IDisposable
     }
 
     /// <summary>
-    /// Sends a prompt to Google's Gemini API and retrieves the generated text response.
+    /// Sends a text-only prompt to Gemini API. For backward compatibility.
     /// </summary>
-    /// <param name="question">The question or prompt to send to the AI.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <returns>The AI-generated response or an error message.</returns>
-    public async Task<string> GetAnswerAsync(string question, CancellationToken cancellationToken = default)
+    public Task<string> GetAnswerAsync(string question, CancellationToken cancellationToken = default)
+    {
+        return GetAnswerAsync(new GeminiRequest { Prompt = question }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends a prompt with optional attachments to Gemini API.
+    /// Supports images (PNG, JPEG, GIF, WebP) and documents (PDF, TXT, DOCX, etc.).
+    /// </summary>
+    public async Task<string> GetAnswerAsync(GeminiRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         
@@ -93,45 +98,18 @@ public class GeminiService : IDisposable
             
             _lastRequestTime = DateTime.UtcNow;
 
-            var requestBody = new GeminiRequest
+            var response = await GenerateContentAsync(request, cancellationToken);
+            return response;
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            var retryAfter = TimeSpan.FromSeconds(60);
+            lock (_backoffLock)
             {
-                contents = new[]
-                {
-                    new Content { parts = new[] { new Part { text = question + _promptPrefix } } }
-                }
-            };
-
-            var json = JsonConvert.SerializeObject(requestBody);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
-            var httpClient = _httpClientFactory.CreateClient(HttpClientNames.GeminiApi);
-            var response = await httpClient.PostAsync($"{ApiUrl}?key={_apiKey}", content, cancellationToken);
-            
-            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (response.IsSuccessStatusCode)
-            {
-                var result = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(responseJson);
-                string? answer = result?["candidates"]?[0]?["content"]?["parts"]?[0]?["text"]?.ToString();
-
-                if (string.IsNullOrEmpty(answer))
-                    return "No answer found.";
-                
-                return answer;
+                _backoffUntil = DateTime.UtcNow.Add(retryAfter);
             }
-
-            if (response.StatusCode == HttpStatusCode.TooManyRequests)
-            {
-                var retryAfter = TimeSpan.FromSeconds(60);
-                lock (_backoffLock)
-                {
-                    _backoffUntil = DateTime.UtcNow.Add(retryAfter);
-                }
-                Log.Warning("429 received from Gemini API. Backing off for {Seconds}s", retryAfter.TotalSeconds);
-            }
-
-            Log.Warning("Gemini API request failed with status {StatusCode}", response.StatusCode);
-            return $"Error: {response.StatusCode}";
+            Log.Warning("429 received from Gemini API. Backing off for {Seconds}s", retryAfter.TotalSeconds);
+            return "Error: Too many requests. Please wait before trying again.";
         }
         catch (OperationCanceledException)
         {
@@ -150,8 +128,91 @@ public class GeminiService : IDisposable
     }
 
     /// <summary>
+    /// Generates content using the Mscc.GenerativeAI library.
+    /// </summary>
+    private async Task<string> GenerateContentAsync(GeminiRequest request, CancellationToken cancellationToken)
+    {
+        var fullPrompt = request.Prompt + _promptSuffix;
+        
+        if (request.Attachments.Count == 0)
+        {
+            var textResponse = await _model.GenerateContent(fullPrompt, cancellationToken: cancellationToken);
+            return ExtractTextFromResponse(textResponse);
+        }
+        
+        var parts = new List<IPart>();
+        parts.Add(new TextData { Text = fullPrompt });
+        
+        using var httpClient = _httpClientFactory.CreateClient(HttpClientNames.GeminiApi);
+        
+        foreach (var attachment in request.Attachments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            
+            if (!GeminiSupportedTypes.IsSupported(attachment.MimeType))
+            {
+                Log.Warning("Unsupported attachment type: {MimeType}, skipping {FileName}", 
+                    attachment.MimeType, attachment.FileName);
+                continue;
+            }
+            
+            if (attachment.Size > GeminiSupportedTypes.MaxFileSizeBytes)
+            {
+                Log.Warning("Attachment too large: {Size} bytes, max {Max} bytes, skipping {FileName}",
+                    attachment.Size, GeminiSupportedTypes.MaxFileSizeBytes, attachment.FileName);
+                continue;
+            }
+            
+            try
+            {
+                var fileBytes = await httpClient.GetByteArrayAsync(attachment.Url, cancellationToken);
+                
+                var inlineDataPart = new InlineData
+                {
+                    MimeType = attachment.MimeType,
+                    Data = Convert.ToBase64String(fileBytes)
+                };
+                parts.Add(inlineDataPart);
+                
+                Log.Debug("Added attachment: {FileName} ({MimeType}, {Size} bytes)", 
+                    attachment.FileName, attachment.MimeType, fileBytes.Length);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to download attachment {FileName} from {Url}", 
+                    attachment.FileName, attachment.Url);
+            }
+        }
+        
+        var response = await _model.GenerateContent(parts, cancellationToken: cancellationToken);
+        
+        return ExtractTextFromResponse(response);
+    }
+
+    /// <summary>
+    /// Extracts the text response from Gemini API response.
+    /// </summary>
+    private static string ExtractTextFromResponse(GenerateContentResponse? response)
+    {
+        if (response?.Candidates == null || response.Candidates.Count == 0)
+            return "No answer found.";
+            
+        var firstCandidate = response.Candidates.FirstOrDefault();
+        if (firstCandidate?.Content?.Parts == null)
+            return "No answer found.";
+            
+        var textParts = firstCandidate.Content.Parts
+            .Where(p => !string.IsNullOrEmpty(p.Text))
+            .Select(p => p.Text);
+            
+        var combinedText = string.Join("\n", textParts.ToList());
+        
+        return string.IsNullOrEmpty(combinedText) ? "No answer found." : combinedText;
+    }
+
+    /// <summary>
     /// Releases resources used by the service.
-    /// Note: HttpClient is managed by IHttpClientFactory, no need to dispose it manually.
+    /// SemaphoreSlim must be disposed manually as it holds unmanaged resources.
     /// </summary>
     public void Dispose()
     {

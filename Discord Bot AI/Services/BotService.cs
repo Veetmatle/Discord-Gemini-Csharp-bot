@@ -1,4 +1,4 @@
-﻿using Discord_Bot_AI.Data;
+﻿﻿using Discord_Bot_AI.Data;
 using Discord;
 using Discord.WebSocket;
 using Discord_Bot_AI.Models;
@@ -25,6 +25,8 @@ public class BotService : IAsyncDisposable
     private readonly IGameSummaryRenderer _renderer;
     private readonly IUserRegistry _userRegistry;
     private readonly IGuildConfigRegistry _guildConfigRegistry;
+    private readonly PolitechnikaService _politechnika;
+    private readonly PolitechnikaWatcherService _politechnikaWatcher;
     private readonly List<IMatchNotification> _notificationStrategies = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private DateTime _startTime;
@@ -44,11 +46,14 @@ public class BotService : IAsyncDisposable
         _renderer = serviceProvider.GetRequiredService<IGameSummaryRenderer>();
         _userRegistry = serviceProvider.GetRequiredService<IUserRegistry>();
         _guildConfigRegistry = serviceProvider.GetRequiredService<IGuildConfigRegistry>();
+        _politechnika = serviceProvider.GetRequiredService<PolitechnikaService>();
+        _politechnikaWatcher = serviceProvider.GetRequiredService<PolitechnikaWatcherService>();
         
         var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent };
         _client = new DiscordSocketClient(config);
         _client.Ready += OnReadyAsync;
         _client.SlashCommandExecuted += OnSlashCommandAsync;
+        _client.MessageReceived += OnMessageReceivedAsync;
         _client.Log += OnDiscordLogAsync;
         _client.JoinedGuild += OnJoinedGuildAsync;
         _client.LeftGuild += OnLeftGuildAsync;
@@ -225,6 +230,7 @@ public class BotService : IAsyncDisposable
         Log.Information("Shutting down...");
         
         var stopTasks = _notificationStrategies.Select(s => s.StopMonitoringAsync()).ToList();
+        stopTasks.Add(_politechnikaWatcher.StopWatchingAsync());
         await Task.WhenAll(stopTasks);
         
         await _client.StopAsync();
@@ -257,6 +263,10 @@ public class BotService : IAsyncDisposable
         }
         
         _ = RunPeriodicCacheCleanupAsync(_shutdownCts.Token);
+        
+        // Start Politechnika watcher
+        _politechnikaWatcher.OnChangeDetected = HandlePolitechnikaChangeAsync;
+        _ = _politechnikaWatcher.StartWatchingAsync(_shutdownCts.Token);
     }
 
     /// <summary>
@@ -326,9 +336,10 @@ public class BotService : IAsyncDisposable
             .WithDescription("bot main command")
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("ask")
-                .WithDescription("write your question")
+                .WithDescription("Ask AI a question (for multiple files use: !ask) :D")
                 .WithType(ApplicationCommandOptionType.SubCommand)
-                .AddOption("query", ApplicationCommandOptionType.String, "here provide content", isRequired: true))
+                .AddOption("query", ApplicationCommandOptionType.String, "your question", isRequired: true)
+                .AddOption("attachment", ApplicationCommandOptionType.Attachment, "attach an image or document (optional)", isRequired: false))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("info")
                 .WithDescription("show info about bot")
@@ -355,6 +366,19 @@ public class BotService : IAsyncDisposable
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("check-latest-match")
                 .WithDescription("Check and display your latest match result")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("pk")
+                .WithDescription("Search Politechnika Krakowska WIiT resources (plans, schedules, documents)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("query", ApplicationCommandOptionType.String, "What are you looking for? (e.g. 'plan zajęć informatyka I stopień')", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("pk-watch-start")
+                .WithDescription("Start watching for schedule updates on this channel")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("pk-watch-stop")
+                .WithDescription("Stop watching for schedule updates on this channel")
                 .WithType(ApplicationCommandOptionType.SubCommand))
             .Build();
 
@@ -386,9 +410,6 @@ public class BotService : IAsyncDisposable
                     case "ask":
                         await HandleAskCommandAsync(command, subCommand); 
                         break;
-                    case "info":
-                        await command.RespondAsync("LaskBot -> v1. Created by Lask.");
-                        break;
                     case "register":
                         await RegisterRiotAccountAsync(command, subCommand); 
                         break;
@@ -403,6 +424,15 @@ public class BotService : IAsyncDisposable
                         break;
                     case "check-latest-match":
                         await CheckLatestMatchAsync(command);
+                        break;
+                    case "pk":
+                        await HandlePolitechnikaQueryAsync(command, subCommand);
+                        break;
+                    case "pk-watch-start":
+                        await HandlePkWatchStartAsync(command);
+                        break;
+                    case "pk-watch-stop":
+                        await HandlePkWatchStopAsync(command);
                         break;
                 }
             }
@@ -456,16 +486,215 @@ public class BotService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Handles the ask command, supporting text prompts with optional image/document attachments.
+    /// For multiple attachments, use text command: !ask [question] with attached files.
+    /// </summary>
     private async Task HandleAskCommandAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
     {
         await command.DeferAsync();
 
         var queryOption = subCommand.Options.FirstOrDefault(o => o.Name == "query");
+        var attachmentOption = subCommand.Options.FirstOrDefault(o => o.Name == "attachment");
+        
         var question = queryOption?.Value?.ToString() ?? "No question provided";
-        var answer = await _gemini.GetAnswerAsync(question, _shutdownCts.Token);
+        
+        var request = new GeminiRequest { Prompt = question };
+        
+        if (attachmentOption?.Value is IAttachment attachment)
+        {
+            AddAttachmentToRequest(request, attachment);
+        }
+        
+        var answer = await _gemini.GetAnswerAsync(request, _shutdownCts.Token);
 
-        string response = $"**Question:**\n {question}\n**Answer:**\n {answer}";
+        string response = BuildAskResponse(question, request.Attachments, answer);
         await command.FollowupAsync(response);
+    }
+    
+    /// <summary>
+    /// Handles Politechnika Krakowska WIiT query - searches for documents, schedules, plans etc.
+    /// </summary>
+    private async Task HandlePolitechnikaQueryAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
+    {
+        await command.DeferAsync();
+        
+        var queryOption = subCommand.Options.FirstOrDefault(o => o.Name == "query");
+        var userQuery = queryOption?.Value?.ToString() ?? "";
+        
+        if (string.IsNullOrWhiteSpace(userQuery))
+        {
+            await command.FollowupAsync("Podaj zapytanie, np. 'plan zajęć informatyka I stopień'.");
+            return;
+        }
+        
+        Log.Information("Processing Politechnika query: {Query} from user {User}", userQuery, command.User.Username);
+        
+        var result = await _politechnika.ProcessQueryAsync(userQuery, _shutdownCts.Token);
+        
+        var sb = new System.Text.StringBuilder();
+        
+        if (result.Success && !string.IsNullOrEmpty(result.Url))
+        {
+            sb.AppendLine($"**Zapytanie:** {userQuery}");
+            sb.AppendLine();
+            
+            if (result.IsFile)
+            {
+                var downloadInfo = await _politechnika.CheckFileDownloadableAsync(result.Url, _shutdownCts.Token);
+                
+                if (downloadInfo.CanDownload)
+                {
+                    var downloadResult = await _politechnika.DownloadFileAsync(result.Url, _shutdownCts.Token);
+                    
+                    if (downloadResult.HasValue && downloadResult.Value.Stream != null)
+                    {
+                        sb.AppendLine($"**Znaleziono plik ({result.FileType}):** {result.LinkText}");
+                        sb.AppendLine($"*Źródło: {result.SourceUrl}*");
+                        
+                        await using var stream = downloadResult.Value.Stream;
+                        var attachment = new FileAttachment(stream, downloadResult.Value.FileName);
+                        await command.FollowupWithFileAsync(attachment, text: sb.ToString());
+                        return;
+                    }
+                }
+                sb.AppendLine($"**Znaleziono plik ({result.FileType}):** {result.LinkText}");
+                if (!downloadInfo.CanDownload && downloadInfo.Reason != null)
+                {
+                    sb.AppendLine($"*({downloadInfo.Reason})*");
+                }
+                sb.AppendLine($"**Link:** {result.Url}");
+            }
+            else
+            {
+                sb.AppendLine($"**Znaleziono:** {result.LinkText}");
+                sb.AppendLine($"**Link:** {result.Url}");
+            }
+            
+            sb.AppendLine();
+            sb.AppendLine($"*Źródło: {result.SourceUrl}*");
+        }
+        else
+        {
+            sb.AppendLine($"**Zapytanie:** {userQuery}");
+            sb.AppendLine();
+            sb.AppendLine($"**Wynik:** {result.Message}");
+            sb.AppendLine();
+            sb.AppendLine($"**Sprawdź stronę bezpośrednio:** {result.SourceUrl}");
+        }
+        
+        await command.FollowupAsync(sb.ToString());
+    }
+    
+    /// <summary>
+    /// Handles text-based messages starting with !ask prefix.
+    /// Supports multiple attachments (images, documents, screenshots).
+    /// Usage: !ask [your question] + attach files to the message.
+    /// </summary>
+    private Task OnMessageReceivedAsync(SocketMessage message)
+    {
+        if (message.Author.IsBot) return Task.CompletedTask;
+        if (message is not SocketUserMessage) return Task.CompletedTask;
+        
+        var content = message.Content.Trim();
+        if (!content.StartsWith("!ask", StringComparison.OrdinalIgnoreCase)) return Task.CompletedTask;
+        
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var question = content.Length > 4 
+                    ? content[4..].Trim() 
+                    : "Please analyze the attached content.";
+                
+                if (string.IsNullOrWhiteSpace(question) && message.Attachments.Count == 0)
+                {
+                    await message.Channel.SendMessageAsync("Please provide a question or attach files to analyze.");
+                    return;
+                }
+                
+                using var typingState = message.Channel.EnterTypingState();
+                
+                var request = new GeminiRequest { Prompt = question };
+                
+                foreach (var attachment in message.Attachments)
+                {
+                    AddAttachmentToRequest(request, attachment);
+                }
+                
+                if (request.Attachments.Count > 0)
+                {
+                    Log.Information("Processing !ask command with {Count} attachment(s) from user {User}", 
+                        request.Attachments.Count, message.Author.Username);
+                }
+                
+                var answer = await _gemini.GetAnswerAsync(request, _shutdownCts.Token);
+                
+                string response = BuildAskResponse(question, request.Attachments, answer);
+                await message.Channel.SendMessageAsync(response, messageReference: new MessageReference(message.Id));
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Debug("!ask command cancelled");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error processing !ask command");
+                await message.Channel.SendMessageAsync("An error occurred while processing your request.");
+            }
+        });
+        
+        return Task.CompletedTask;
+    }
+    
+    /// <summary>
+    /// Adds a Discord attachment to a Gemini request, validating size and type.
+    /// </summary>
+    private static void AddAttachmentToRequest(GeminiRequest request, IAttachment attachment)
+    {
+        var geminiAttachment = new GeminiAttachment
+        {
+            Url = attachment.Url,
+            MimeType = attachment.ContentType ?? "application/octet-stream",
+            FileName = attachment.Filename,
+            Size = attachment.Size
+        };
+        
+        if (!GeminiSupportedTypes.IsSupported(geminiAttachment.MimeType))
+        {
+            Log.Warning("Skipping unsupported attachment type: {FileName} ({MimeType})", 
+                attachment.Filename, attachment.ContentType);
+            return;
+        }
+        
+        if (geminiAttachment.Size > GeminiSupportedTypes.MaxFileSizeBytes)
+        {
+            Log.Warning("Skipping attachment too large: {FileName} ({Size} bytes)", 
+                attachment.Filename, geminiAttachment.Size);
+            return;
+        }
+        
+        request.Attachments.Add(geminiAttachment);
+        Log.Debug("Attachment added to Gemini request: {FileName} ({MimeType})", 
+            attachment.Filename, attachment.ContentType);
+    }
+    
+    /// <summary>
+    /// Builds the response message for ask command, including attachment info.
+    /// </summary>
+    private static string BuildAskResponse(string question, List<GeminiAttachment> attachments, string answer)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"**Question:** {question}");
+        
+        if (attachments.Count > 0)
+        {
+            var fileNames = string.Join(", ", attachments.Select(a => a.FileName));
+            sb.AppendLine($"**Attachments ({attachments.Count}):** {fileNames}");
+        }
+        
+        sb.AppendLine($"**Answer:** {answer}");
+        return sb.ToString();
     }
 
     private async Task RegisterRiotAccountAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
@@ -765,6 +994,146 @@ public class BotService : IAsyncDisposable
         catch (Exception ex)
         {
             Log.Error(ex, "Could not send broken config notification to guild {GuildId}", guild.Id);
+        }
+    }
+    
+    /// <summary>
+    /// Starts watching for Politechnika schedule updates on current channel.
+    /// </summary>
+    private async Task HandlePkWatchStartAsync(SocketSlashCommand command)
+    {
+        var guildId = command.GuildId;
+        var channelId = command.ChannelId;
+        
+        if (!guildId.HasValue || !channelId.HasValue)
+        {
+            await command.RespondAsync("Ta komenda działa tylko na serwerze.", ephemeral: true);
+            return;
+        }
+        
+        if (_politechnikaWatcher.IsChannelSubscribed(guildId.Value, channelId.Value))
+        {
+            await command.RespondAsync("📚 Ten kanał już obserwuje aktualizacje planów zajęć.", ephemeral: true);
+            return;
+        }
+        
+        var success = await _politechnikaWatcher.SubscribeChannelAsync(
+            guildId.Value, channelId.Value, command.User.Id, _shutdownCts.Token);
+        
+        if (success)
+        {
+            await command.RespondAsync(
+                "✅ **Włączono obserwowanie aktualizacji!**\n\n" +
+                "Ten kanał będzie otrzymywać powiadomienia gdy pojawi się nowy plan zajęć lub harmonogram na stronie WIiT PK.\n" +
+                "Sprawdzanie odbywa się co 30 minut.\n\n" +
+                "Aby wyłączyć: `/laskbot pk-watch-stop`");
+        }
+        else
+        {
+            await command.RespondAsync("❌ Nie udało się włączyć obserwowania.", ephemeral: true);
+        }
+    }
+    
+    /// <summary>
+    /// Stops watching for Politechnika schedule updates on current channel.
+    /// </summary>
+    private async Task HandlePkWatchStopAsync(SocketSlashCommand command)
+    {
+        var guildId = command.GuildId;
+        var channelId = command.ChannelId;
+        
+        if (!guildId.HasValue || !channelId.HasValue)
+        {
+            await command.RespondAsync("Ta komenda działa tylko na serwerze.", ephemeral: true);
+            return;
+        }
+        
+        if (!_politechnikaWatcher.IsChannelSubscribed(guildId.Value, channelId.Value))
+        {
+            await command.RespondAsync("📚 Ten kanał nie obserwuje aktualizacji planów zajęć.", ephemeral: true);
+            return;
+        }
+        
+        var success = await _politechnikaWatcher.UnsubscribeChannelAsync(
+            guildId.Value, channelId.Value, _shutdownCts.Token);
+        
+        if (success)
+        {
+            await command.RespondAsync("✅ **Wyłączono obserwowanie aktualizacji.**\n\nTen kanał nie będzie już otrzymywać powiadomień o planach zajęć.");
+        }
+        else
+        {
+            await command.RespondAsync("❌ Nie udało się wyłączyć obserwowania.", ephemeral: true);
+        }
+    }
+    
+    /// <summary>
+    /// Handles Politechnika website change notifications from the watcher service.
+    /// Sends notifications only to subscribed channels.
+    /// </summary>
+    private async Task HandlePolitechnikaChangeAsync(PolitechnikaChangeNotification notification, CancellationToken ct)
+    {
+        if (notification.SubscribedChannels.Count == 0)
+        {
+            Log.Debug("No subscribed channels for Politechnika notifications");
+            return;
+        }
+        
+        // Build notification message
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("📚 **Politechnika Krakowska - Aktualizacja!**");
+        sb.AppendLine();
+        
+        if (notification.ChangeType == ChangeType.New)
+        {
+            sb.AppendLine($"🆕 **Nowy dokument:** {notification.PatternName}");
+        }
+        else
+        {
+            sb.AppendLine($"🔄 **Aktualizacja:** {notification.PatternName}");
+            if (notification.OldDate != null && notification.NewDate != null)
+            {
+                sb.AppendLine($"📅 Data zmieniła się z `{notification.OldDate}` na `{notification.NewDate}`");
+            }
+        }
+        
+        sb.AppendLine();
+        sb.AppendLine($"📄 **{notification.LinkText}**");
+        sb.AppendLine($"🔗 {notification.LinkUrl}");
+        
+        var message = sb.ToString();
+        
+        // Send to each subscribed channel
+        foreach (var subscription in notification.SubscribedChannels)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            var guild = _client.GetGuild(subscription.GuildId);
+            if (guild == null)
+            {
+                Log.Warning("Guild {GuildId} not found for PK notification", subscription.GuildId);
+                continue;
+            }
+            
+            var channel = guild.GetTextChannel(subscription.ChannelId);
+            if (channel == null)
+            {
+                Log.Warning("Channel {ChannelId} not found in guild {GuildName}", subscription.ChannelId, guild.Name);
+                // Remove invalid subscription
+                await _politechnikaWatcher.UnsubscribeChannelAsync(subscription.GuildId, subscription.ChannelId, ct);
+                continue;
+            }
+            
+            try
+            {
+                await channel.SendMessageAsync(message, options: new RequestOptions { CancelToken = ct });
+                Log.Information("Sent PK update to channel {ChannelId} in guild {GuildName}", 
+                    subscription.ChannelId, guild.Name);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to send PK notification to channel {ChannelId}", subscription.ChannelId);
+            }
         }
     }
 

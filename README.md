@@ -93,7 +93,8 @@ Discord Bot AI/
 ├── Services/                  # Core business logic
 │   ├── BotService.cs          # Main orchestrator
 │   ├── RiotService.cs         # Riot API client
-│   ├── GeminiService.cs       # Gemini AI client
+│   ├── GeminiService.cs       # Gemini AI client (multimodal)
+│   ├── PolitechnikaService.cs # WIiT PK web scraping + AI search
 │   ├── RiotImageCacheService.cs  # Asset caching with cleanup
 │   └── LoggingService.cs      # Serilog configuration
 └── Strategy/                  # Strategy pattern implementations
@@ -143,8 +144,45 @@ The bot automatically manages guilds without requiring manual configuration:
 | /laskbot unregister | Remove account from this server |
 | /laskbot setup-channel channel:X | Set notification channel (Admin only) |
 | /laskbot status | Show bot uptime, stats, cache info |
-| /laskbot ask query:X | Ask Gemini AI a question |
+| /laskbot ask query:X [attachment:file] | Ask Gemini AI with optional single attachment |
+| /laskbot check-latest-match | Display your latest match result |
+| /laskbot pk query:X | Search Politechnika Krakowska WIiT resources |
+| /laskbot pk-watch-start | Start watching for schedule updates on this channel |
+| /laskbot pk-watch-stop | Stop watching for schedule updates on this channel |
 | /laskbot info | Show bot information |
+| !ask [question] + attachments | Text command for multiple attachments |
+
+#### Politechnika Krakowska WIiT Integration
+The bot can search the Politechnika Krakowska WIiT website for documents, schedules, and resources:
+- **Command:** `/laskbot pk query:"plan zajęć informatyka I stopień"`
+- **Features:**
+  - Web scraping of it.pk.edu.pl with caching (1 hour)
+  - Gemini AI for intelligent link matching
+  - Priority for newest documents (by date in filename)
+  - Direct file links (.pdf, .xlsx, .docx)
+  - Degree level filtering (I stopień vs II stopień)
+
+#### Schedule Watcher
+Automatic monitoring for new/updated schedules:
+- **Start:** `/laskbot pk-watch-start` - subscribe current channel to updates
+- **Stop:** `/laskbot pk-watch-stop` - unsubscribe current channel
+- **Features:**
+  - Checks every 30 minutes for changes
+  - Detects new documents and date changes in existing ones
+  - Per-channel subscriptions (notifications go only to subscribed channels)
+  - Persistent state (survives bot restart via pk_state.json)
+  - Patterns: Informatyka I/II stopień, Teleinformatyka I stopień
+
+#### AI Attachments Support
+The bot supports asking Gemini AI questions with attached files:
+- **Slash command** `/laskbot ask` - supports one optional attachment
+- **Text command** `!ask` - supports unlimited attachments (images, documents)
+
+Supported file types:
+- Images: PNG, JPEG, GIF, WebP
+- Documents: PDF, TXT, CSV, HTML, Markdown, JSON
+- Office: DOCX, XLSX, PPTX
+- Max file size: 20MB per file
 
 #### Data Separation (SRP)
 - UserRegistry: manages user-to-Riot-account mappings (users.json)
@@ -432,22 +470,64 @@ If user then unregisters from Server B:
 ### Scenario 6: User Asks AI Question
 
 ```
-1. User executes /laskbot ask query:"What is League of Legends?"
-2. BotService.HandleAskCommandAsync called
-3. command.DeferAsync() - Discord shows "thinking..."
-4. GeminiService.GetAnswerAsync(question, token)
+1. User executes /laskbot ask query:"What is this?" attachment:[screenshot.png]
+   OR user sends: !ask What are these items? [attached: item1.png, item2.png]
+2. BotService.HandleAskCommandAsync or OnMessageReceivedAsync called
+3. command.DeferAsync() or EnterTypingState() - Discord shows "thinking..."
+4. AddAttachmentToRequest() validates each attachment:
+   - Check MIME type against GeminiSupportedTypes
+   - Check file size (max 20MB)
+   - Add valid attachments to GeminiRequest.Attachments list
+5. GeminiService.GetAnswerAsync(request, token)
    - SemaphoreSlim.WaitAsync(token) - rate limiting
    - Check minimum interval (1s)
-   - Build GeminiRequest with prompt prefix
-   - IHttpClientFactory.CreateClient("GeminiApi")
-   - HttpClient.PostAsync(url, content, token)
-   - Polly handles 429/5xx with retries
-   - Parse response, extract answer text
+   - If no attachments: GenerateContent(prompt, token)
+   - If attachments present:
+     - Download each file via HttpClient.GetByteArrayAsync(url, token)
+     - Convert to base64, create InlineData parts
+     - Build multimodal content: [TextData] + [InlineData...]
+     - GenerateContent(parts, token)
+   - Extract text from GenerateContentResponse
    - SemaphoreSlim.Release()
-5. command.FollowupAsync(formatted response)
+6. BuildAskResponse() formats answer with attachment info
+7. command.FollowupAsync() or channel.SendMessageAsync() with MessageReference
 ```
 
-### Scenario 7: Graceful Shutdown (Docker stop)
+### Scenario 7: Politechnika WIiT Resource Search
+
+```
+1. User executes /laskbot pk query:"plan zajęć informatyka I stopień"
+2. BotService.HandlePolitechnikaQueryAsync called
+3. command.DeferAsync() - Discord shows "thinking..."
+4. PolitechnikaService.ProcessQueryAsync(query, token)
+   - Check cache (1 hour expiration)
+   - If cache expired or empty:
+     a. SemaphoreSlim.WaitAsync(token) - scrape lock
+     b. Scrape multiple pages from it.pk.edu.pl:
+        - /studenci/
+        - /studenci/studia-i-stopnia/
+        - /studenci/plany-zajec/
+        - etc.
+     c. Parse HTML with HtmlAgilityPack
+     d. Extract links (text + URL pairs)
+     e. Filter relevant links (documents, pk.edu.pl domain)
+     f. Cache results
+     g. SemaphoreSlim.Release()
+5. Build Gemini prompt with scraped links
+   - Include user query
+   - Include all link text + URL pairs
+   - Instructions for intelligent matching (newest date, correct degree level)
+6. GeminiService.GetAnswerAsync(prompt, token)
+   - Rate limiting as usual
+   - Gemini returns single best-matching URL or "NOT_FOUND"
+7. ParseGeminiResponse()
+   - Extract URL from response
+   - Determine if file (.pdf, .xlsx, etc.)
+   - Build PolitechnikaResponse with link, file type, source
+8. Format and send response to user with link
+```
+
+### Scenario 8: Graceful Shutdown (Docker stop)
 
 ```
 1. Docker sends SIGTERM to container
@@ -482,12 +562,14 @@ If user then unregisters from Server B:
 | ServiceCollectionExtensions | DI registration, HTTP client config, Polly policies |
 | BotService | Main orchestrator, Discord event handling, lifecycle |
 | RiotService | Riot API communication, rate limiting |
-| GeminiService | Gemini AI communication, rate limiting |
+| GeminiService | Gemini AI communication, rate limiting, multimodal support |
+| PolitechnikaService | Web scraping it.pk.edu.pl, Gemini-powered link matching |
 | RiotImageCacheService | Download and cache game assets |
 | UserRegistry | Persist user-account mappings, thread-safe |
+| GuildConfigRegistry | Persist per-server settings, thread-safe |
 | LoggingService | Serilog configuration |
 | PollingStrategy | Background match detection loop |
-| CommandStrategy | On-demand match checking - implemented on command (also implemented with CancellationToken, this time given - no loop) |
+| CommandStrategy | On-demand match checking (also with CancellationToken) |
 | ImageSharpRenderer | Generate match summary images |
 
 ---
@@ -566,6 +648,8 @@ docker build -t discord-bot-ai .
 - Microsoft.Extensions.Http - IHttpClientFactory
 - Microsoft.Extensions.Http.Polly - Polly integration
 - Polly 8.5.1 - Resilience policies
+- Mscc.GenerativeAI 3.0.2 - Google Gemini SDK (multimodal support)
+- HtmlAgilityPack - HTML parsing for web scraping
 - Serilog - Structured logging
 - SixLabors.ImageSharp - Image generation
 - Newtonsoft.Json - JSON serialization

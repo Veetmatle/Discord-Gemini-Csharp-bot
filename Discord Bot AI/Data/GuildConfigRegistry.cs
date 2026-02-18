@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+﻿﻿using Newtonsoft.Json;
 using Discord_Bot_AI.Models;
 using Serilog;
 
@@ -98,14 +98,31 @@ public class GuildConfigRegistry : IGuildConfigRegistry
     /// <summary>
     /// Gets the full configuration for a guild.
     /// </summary>
-    /// <param name="guildId">The Discord guild ID.</param>
-    /// <returns>The guild configuration or null if not found.</returns>
     public GuildConfig? GetConfig(ulong guildId)
     {
         _lock.EnterReadLock();
         try
         {
             return _guildConfigs.GetValueOrDefault(guildId);
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+    
+    /// <summary>
+    /// Gets all guild IDs that have a notification channel configured.
+    /// </summary>
+    public List<ulong> GetAllConfiguredGuildIds()
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            return _guildConfigs
+                .Where(kvp => kvp.Value.NotificationChannelId != 0)
+                .Select(kvp => kvp.Key)
+                .ToList();
         }
         finally
         {

@@ -1,4 +1,4 @@
-﻿﻿using System.Net;
+﻿﻿﻿﻿using System.Net;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Data;
 using Discord_Bot_AI.Services;
@@ -36,6 +36,12 @@ public static class ServiceCollectionExtensions
         // Register API services that use IHttpClientFactory
         services.AddSingleton<RiotService>();
         services.AddSingleton<GeminiService>();
+        services.AddSingleton<PolitechnikaService>();
+        
+        // Register background watcher services
+        services.AddSingleton<PolitechnikaWatcherService>(sp => new PolitechnikaWatcherService(
+            sp.GetRequiredService<PolitechnikaService>(),
+            settings.DataPath));
         
         return services;
     }
