@@ -9,6 +9,7 @@ public class RiotAccount
     public string gameName { get; set; }
     public string tagLine { get; set; }
     public string? LastMatchId { get; set; }
+    public string? LastTftMatchId { get; set; }
     
     /// <summary>
     /// List of Discord Guild (server) IDs where this account is registered.

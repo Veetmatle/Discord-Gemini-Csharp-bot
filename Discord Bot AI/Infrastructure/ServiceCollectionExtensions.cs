@@ -32,6 +32,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IGuildConfigRegistry>(_ => new GuildConfigRegistry(settings.DataPath));
         services.AddSingleton<RiotImageCacheService>(_ => new RiotImageCacheService(settings.RiotVersion, settings.CachePath));
         services.AddSingleton<IGameSummaryRenderer, ImageSharpRenderer>();
+        services.AddSingleton<ITftSummaryRenderer, TftImageSharpRenderer>();
         
         // Register API services that use IHttpClientFactory
         services.AddSingleton<RiotService>();

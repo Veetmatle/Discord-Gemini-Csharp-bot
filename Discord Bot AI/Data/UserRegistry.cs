@@ -65,8 +65,6 @@ public class UserRegistry : IUserRegistry
     /// <summary>
     /// Updates the last match ID for an existing account without full re-registration.
     /// </summary>
-    /// <param name="discordUserId">The Discord user's unique identifier.</param>
-    /// <param name="lastMatchId">The new last match ID to store.</param>
     public void UpdateLastMatchId(ulong discordUserId, string lastMatchId)
     {
         _lock.EnterWriteLock();
@@ -75,6 +73,26 @@ public class UserRegistry : IUserRegistry
             if (_userMap.TryGetValue(discordUserId, out var account))
             {
                 account.LastMatchId = lastMatchId;
+                SaveInternal();
+            }
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Updates the last TFT match ID for an existing account.
+    /// </summary>
+    public void UpdateLastTftMatchId(ulong discordUserId, string lastTftMatchId)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            if (_userMap.TryGetValue(discordUserId, out var account))
+            {
+                account.LastTftMatchId = lastTftMatchId;
                 SaveInternal();
             }
         }
@@ -98,7 +116,8 @@ public class UserRegistry : IUserRegistry
             {
                 var oldPuuid = account.puuid;
                 account.puuid = newPuuid;
-                account.LastMatchId = null; 
+                account.LastMatchId = null;
+                account.LastTftMatchId = null;
                 SaveInternal();
                 Log.Information("Migrated PUUID for {PlayerName}: {OldPuuid} -> {NewPuuid}", 
                     account.gameName, oldPuuid[..10] + "...", newPuuid[..10] + "...");

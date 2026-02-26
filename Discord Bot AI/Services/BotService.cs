@@ -23,6 +23,7 @@ public class BotService : IAsyncDisposable
     private readonly RiotService _riot;
     private readonly RiotImageCacheService _imageCache;
     private readonly IGameSummaryRenderer _renderer;
+    private readonly ITftSummaryRenderer _tftRenderer;
     private readonly IUserRegistry _userRegistry;
     private readonly IGuildConfigRegistry _guildConfigRegistry;
     private readonly PolitechnikaService _politechnika;
@@ -44,6 +45,7 @@ public class BotService : IAsyncDisposable
         _riot = serviceProvider.GetRequiredService<RiotService>();
         _imageCache = serviceProvider.GetRequiredService<RiotImageCacheService>();
         _renderer = serviceProvider.GetRequiredService<IGameSummaryRenderer>();
+        _tftRenderer = serviceProvider.GetRequiredService<ITftSummaryRenderer>();
         _userRegistry = serviceProvider.GetRequiredService<IUserRegistry>();
         _guildConfigRegistry = serviceProvider.GetRequiredService<IGuildConfigRegistry>();
         _politechnika = serviceProvider.GetRequiredService<PolitechnikaService>();
@@ -75,6 +77,8 @@ public class BotService : IAsyncDisposable
         await StartDiscordClientAsync();
         
         await MigrateUserPuuidsAsync();
+        
+        await SyncTftMatchIdsAsync();
         
         StartBackgroundMonitoring();
         
@@ -168,6 +172,50 @@ public class BotService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Silently populates LastTftMatchId for users who don't have one yet,
+    /// preventing false "new match" notifications after TFT tracking was added.
+    /// </summary>
+    private async Task SyncTftMatchIdsAsync()
+    {
+        var users = _userRegistry.GetAllTrackedUsers()
+            .Where(u => string.IsNullOrEmpty(u.Value.LastTftMatchId))
+            .ToList();
+
+        if (users.Count == 0)
+            return;
+
+        Log.Information("Syncing TFT match IDs for {Count} user(s)", users.Count);
+        int synced = 0;
+
+        foreach (var entry in users)
+        {
+            try
+            {
+                var tftMatchId = await _riot.GetLatestTftMatchIdAsync(entry.Value.puuid, _shutdownCts.Token);
+
+                if (!string.IsNullOrEmpty(tftMatchId))
+                {
+                    _userRegistry.UpdateLastTftMatchId(entry.Key, tftMatchId);
+                    synced++;
+                }
+
+                await Task.Delay(1500, _shutdownCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Warning("TFT match ID sync cancelled");
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error syncing TFT match ID for {GameName}", entry.Value.gameName);
+            }
+        }
+
+        Log.Information("TFT match ID sync completed: {Synced}/{Total}", synced, users.Count);
+    }
+
+    /// <summary>
     /// Returns the current health status of the bot for monitoring purposes.
     /// </summary>
     public HealthStatus GetHealthStatus()
@@ -244,7 +292,7 @@ public class BotService : IAsyncDisposable
     /// </summary>
     private void InitializeNotificationStrategies()
     {
-        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
+        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync, NotifyTftMatchFinishedAsync));
         _notificationStrategies.Add(new CommandStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
         Log.Information("Notification strategies initialized: {Count}", _notificationStrategies.Count);
     }
@@ -363,6 +411,10 @@ public class BotService : IAsyncDisposable
                 .WithDescription("Check and display your latest match result")
                 .WithType(ApplicationCommandOptionType.SubCommand))
             .AddOption(new SlashCommandOptionBuilder()
+                .WithName("check-latest-tft")
+                .WithDescription("Check and display your latest TFT match result")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
                 .WithName("pk")
                 .WithDescription("Search Politechnika Krakowska WIiT resources (plans, schedules, documents)")
                 .WithType(ApplicationCommandOptionType.SubCommand)
@@ -419,6 +471,9 @@ public class BotService : IAsyncDisposable
                         break;
                     case "check-latest-match":
                         await CheckLatestMatchAsync(command);
+                        break;
+                    case "check-latest-tft":
+                        await CheckLatestTftMatchAsync(command);
                         break;
                     case "pk":
                         await HandlePolitechnikaQueryAsync(command, subCommand);
@@ -531,7 +586,6 @@ public class BotService : IAsyncDisposable
         
         if (result.Success && !string.IsNullOrEmpty(result.Url))
         {
-            // Short answer from Gemini first (if available)
             if (!string.IsNullOrWhiteSpace(result.Answer))
             {
                 sb.AppendLine($"📚 {result.Answer}");
@@ -576,7 +630,7 @@ public class BotService : IAsyncDisposable
         {
             if (!string.IsNullOrWhiteSpace(result.Answer))
             {
-                sb.AppendLine($"📚 {result.Answer}");
+                sb.AppendLine($"{result.Answer}");
                 sb.AppendLine();
             }
             sb.AppendLine($"**Wynik:** {result.Message}");
@@ -737,6 +791,7 @@ public class BotService : IAsyncDisposable
         if (account != null)
         {
             account.LastMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, _shutdownCts.Token);
+            account.LastTftMatchId = await _riot.GetLatestTftMatchIdAsync(account.puuid, _shutdownCts.Token);
             _userRegistry.RegisterUser(command.User.Id, account, guildId.Value);
             await command.FollowupAsync($"Account registered: **{account.gameName}#{account.tagLine}**.");
         }
@@ -840,7 +895,6 @@ public class BotService : IAsyncDisposable
         
         try
         {
-            // Get latest match directly without using the polling strategy's callback
             string? matchId = await _riot.GetLatestMatchIdAsync(account.puuid, _shutdownCts.Token);
             
             if (string.IsNullOrEmpty(matchId))
@@ -856,7 +910,6 @@ public class BotService : IAsyncDisposable
                 return;
             }
             
-            // Render the match summary
             using var imageStream = await _renderer.RenderSummaryAsync(account, matchData, _shutdownCts.Token);
             using var memoryStream = new MemoryStream();
             await imageStream.CopyToAsync(memoryStream, _shutdownCts.Token);
@@ -865,7 +918,6 @@ public class BotService : IAsyncDisposable
             var me = matchData.info.participants.FirstOrDefault(p => p.puuid == account.puuid);
             string resultText = me?.win == true ? "Victory" : "Defeat";
             
-            // Send directly to the channel where command was invoked
             await command.FollowupWithFileAsync(
                 memoryStream,
                 "match_summary.png",
@@ -884,12 +936,80 @@ public class BotService : IAsyncDisposable
     }
     
     /// <summary>
+    /// Checks and displays the latest TFT match for the requesting user.
+    /// Sends the result directly to the channel where the command was invoked.
+    /// </summary>
+    private async Task CheckLatestTftMatchAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+        
+        var guildId = command.GuildId;
+        if (guildId == null)
+        {
+            await command.FollowupAsync("This command must be used in a server.");
+            return;
+        }
+        
+        var account = _userRegistry.GetAccount(command.User.Id);
+        if (account == null)
+        {
+            await command.FollowupAsync("You are not registered. Use `/laskbot register` first.");
+            return;
+        }
+        
+        if (!account.RegisteredGuildIds.Contains(guildId.Value))
+        {
+            await command.FollowupAsync("You are not registered on this server. Use `/laskbot register` to register here.");
+            return;
+        }
+        
+        try
+        {
+            string? matchId = await _riot.GetLatestTftMatchIdAsync(account.puuid, _shutdownCts.Token);
+            
+            if (string.IsNullOrEmpty(matchId))
+            {
+                await command.FollowupAsync("No recent TFT matches found for your account.");
+                return;
+            }
+            
+            var matchData = await _riot.GetTftMatchDetailsAsync(matchId, _shutdownCts.Token);
+            if (matchData == null)
+            {
+                await command.FollowupAsync("Could not retrieve TFT match details. Please try again later.");
+                return;
+            }
+            
+            using var imageStream = await _tftRenderer.RenderTftSummaryAsync(account, matchData, _shutdownCts.Token);
+            using var memoryStream = new MemoryStream();
+            await imageStream.CopyToAsync(memoryStream, _shutdownCts.Token);
+            memoryStream.Position = 0;
+            
+            var me = matchData.info.participants.FirstOrDefault(p => p.puuid == account.puuid);
+            int placement = me?.placement ?? 0;
+            string resultText = placement <= 4 ? $"Top {placement}" : $"#{placement}";
+            
+            await command.FollowupWithFileAsync(
+                memoryStream,
+                "tft_summary.png",
+                $"**{account.gameName}#{account.tagLine}** - TFT {resultText}"
+            );
+        }
+        catch (OperationCanceledException)
+        {
+            await command.FollowupAsync("Operation was cancelled.");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to check latest TFT match for user {UserId}", command.User.Id);
+            await command.FollowupAsync("Failed to retrieve your latest TFT match. Please try again later.");
+        }
+    }
+    
+    /// <summary>
     /// Sends match notification to all guilds where the account is registered.
     /// Renders the image once and sends it to all configured notification channels.
     /// </summary>
-    /// <param name="account">The Riot account of the player.</param>
-    /// <param name="matchData">The match data to display.</param>
-    /// <param name="ct">Cancellation token to cancel the operation.</param>
     private async Task NotifyMatchFinishedAsync(RiotAccount account, MatchData matchData, CancellationToken ct = default)
     {
         if (account.RegisteredGuildIds.Count == 0)
@@ -964,6 +1084,89 @@ public class BotService : IAsyncDisposable
         }
     }
     
+    /// <summary>
+    /// Sends TFT match notification to all guilds where the account is registered.
+    /// Renders the TFT summary once and distributes to all configured channels.
+    /// </summary>
+    private async Task NotifyTftMatchFinishedAsync(RiotAccount account, TftMatchData matchData, CancellationToken ct = default)
+    {
+        if (account.RegisteredGuildIds.Count == 0)
+        {
+            Log.Warning("Account {PlayerName} has no registered guilds for TFT notification", account.gameName);
+            return;
+        }
+
+        byte[]? imageData = null;
+        
+        try
+        {
+            using var imageStream = await _tftRenderer.RenderTftSummaryAsync(account, matchData, ct);
+            using var memoryStream = new MemoryStream();
+            await imageStream.CopyToAsync(memoryStream, ct);
+            imageData = memoryStream.ToArray();
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("TFT notification cancelled during rendering");
+            return;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to render TFT summary for {PlayerName}", account.gameName);
+            return;
+        }
+
+        var me = matchData.info.participants.FirstOrDefault(p => p.puuid == account.puuid);
+        int placement = me?.placement ?? 0;
+        string placementText = placement <= 4 ? $"Top {placement}" : $"#{placement}";
+
+        foreach (var guildId in account.RegisteredGuildIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            var guild = _client.GetGuild(guildId);
+            if (guild == null)
+            {
+                Log.Warning("Guild {GuildId} not found for TFT notification", guildId);
+                continue;
+            }
+
+            var channelId = _guildConfigRegistry.GetNotificationChannel(guildId);
+            if (!channelId.HasValue)
+            {
+                Log.Warning("Notification channel not configured for guild {GuildName}", guild.Name);
+                continue;
+            }
+
+            var channel = guild.GetTextChannel(channelId.Value);
+            if (channel == null)
+            {
+                Log.Warning("Channel {ChannelId} not found in guild {GuildName}", channelId.Value, guild.Name);
+                await NotifyAdminAboutBrokenConfigAsync(guild);
+                _guildConfigRegistry.RemoveGuild(guildId);
+                continue;
+            }
+
+            try
+            {
+                using var sendStream = new MemoryStream(imageData);
+                await channel.SendFileAsync(sendStream, "tft_match.png",
+                    $"**{account.gameName}** finished a TFT match - {placementText}",
+                    options: new RequestOptions { CancelToken = ct });
+                Log.Debug("Sent TFT notification to guild {GuildName}", guild.Name);
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Debug("TFT notification cancelled during send to guild {GuildId}", guildId);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to send TFT notification to guild {GuildName}", guild.Name);
+            }
+        }
+    }
+    
     private async Task NotifyAdminAboutBrokenConfigAsync(SocketGuild guild)
     {
         string errorMessage = $"Attention: channel for league notifications on server **{guild.Name}** has been removed or the bot cannot reach it. \n" +
@@ -1014,7 +1217,7 @@ public class BotService : IAsyncDisposable
         
         if (await _politechnikaWatcher.IsChannelSubscribedAsync(guildId.Value, channelId.Value, _shutdownCts.Token))
         {
-            await command.RespondAsync("📚 Ten kanał już obserwuje aktualizacje planów zajęć.", ephemeral: true);
+            await command.RespondAsync("Ten kanał już obserwuje aktualizacje planów zajęć.", ephemeral: true);
             return;
         }
         
@@ -1024,14 +1227,14 @@ public class BotService : IAsyncDisposable
         if (success)
         {
             await command.RespondAsync(
-                "✅ **Włączono obserwowanie aktualizacji!**\n\n" +
+                " **Włączono obserwowanie aktualizacji!**\n\n" +
                 "Ten kanał będzie otrzymywać powiadomienia gdy pojawi się nowy plan zajęć lub harmonogram na stronie WIiT PK.\n" +
                 "Sprawdzanie odbywa się co 30 minut.\n\n" +
                 "Aby wyłączyć: `/laskbot pk-watch-stop`");
         }
         else
         {
-            await command.RespondAsync("❌ Nie udało się włączyć obserwowania.", ephemeral: true);
+            await command.RespondAsync("Nie udało się włączyć obserwowania.", ephemeral: true);
         }
     }
     
@@ -1051,7 +1254,7 @@ public class BotService : IAsyncDisposable
         
         if (!await _politechnikaWatcher.IsChannelSubscribedAsync(guildId.Value, channelId.Value, _shutdownCts.Token))
         {
-            await command.RespondAsync("📚 Ten kanał nie obserwuje aktualizacji planów zajęć.", ephemeral: true);
+            await command.RespondAsync("Ten kanał nie obserwuje aktualizacji planów zajęć.", ephemeral: true);
             return;
         }
         
@@ -1060,11 +1263,11 @@ public class BotService : IAsyncDisposable
         
         if (success)
         {
-            await command.RespondAsync("✅ **Wyłączono obserwowanie aktualizacji.**\n\nTen kanał nie będzie już otrzymywać powiadomień o planach zajęć.");
+            await command.RespondAsync("**Wyłączono obserwowanie aktualizacji.**\n\nTen kanał nie będzie już otrzymywać powiadomień o planach zajęć.");
         }
         else
         {
-            await command.RespondAsync("❌ Nie udało się wyłączyć obserwowania.", ephemeral: true);
+            await command.RespondAsync("Nie udało się wyłączyć obserwowania.", ephemeral: true);
         }
     }
     
@@ -1082,29 +1285,28 @@ public class BotService : IAsyncDisposable
         
         // Build notification message
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("📚 **Politechnika Krakowska - Aktualizacja!**");
+        sb.AppendLine("**Politechnika Krakowska - Aktualizacja!**");
         sb.AppendLine();
         
         if (notification.ChangeType == ChangeType.New)
         {
-            sb.AppendLine($"🆕 **Nowy dokument:** {notification.PatternName}");
+            sb.AppendLine($"**Nowy dokument:** {notification.PatternName}");
         }
         else
         {
-            sb.AppendLine($"🔄 **Aktualizacja:** {notification.PatternName}");
+            sb.AppendLine($"**Aktualizacja:** {notification.PatternName}");
             if (notification.OldDate != null && notification.NewDate != null)
             {
-                sb.AppendLine($"📅 Data zmieniła się z `{notification.OldDate}` na `{notification.NewDate}`");
+                sb.AppendLine($"Data zmieniła się z `{notification.OldDate}` na `{notification.NewDate}`");
             }
         }
         
         sb.AppendLine();
-        sb.AppendLine($"📄 **{notification.LinkText}**");
-        sb.AppendLine($"🔗 {notification.LinkUrl}");
+        sb.AppendLine($"**{notification.LinkText}**");
+        sb.AppendLine($"{notification.LinkUrl}");
         
         var message = sb.ToString();
         
-        // Send to each subscribed channel
         foreach (var subscription in notification.SubscribedChannels)
         {
             ct.ThrowIfCancellationRequested();
@@ -1120,7 +1322,6 @@ public class BotService : IAsyncDisposable
             if (channel == null)
             {
                 Log.Warning("Channel {ChannelId} not found in guild {GuildName}", subscription.ChannelId, guild.Name);
-                // Remove invalid subscription
                 await _politechnikaWatcher.UnsubscribeChannelAsync(subscription.GuildId, subscription.ChannelId, ct);
                 continue;
             }

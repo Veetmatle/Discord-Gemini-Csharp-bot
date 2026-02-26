@@ -6,7 +6,7 @@ using Serilog;
 namespace Discord_Bot_AI.Strategy.Notification;
 
 /// <summary>
-/// Polling-based strategy for detecting new matches by periodically checking the Riot API.
+/// Polling-based strategy for detecting new LoL and TFT matches by periodically checking the Riot API.
 /// Implements graceful shutdown and rate limit awareness.
 /// </summary>
 public class PollingStrategy : IMatchNotification
@@ -14,6 +14,7 @@ public class PollingStrategy : IMatchNotification
     private readonly RiotService _riot;
     private readonly IUserRegistry _userRegistry;
     private readonly Func<RiotAccount, MatchData, CancellationToken, Task> _onNewMatchFound;
+    private readonly Func<RiotAccount, TftMatchData, CancellationToken, Task>? _onNewTftMatchFound;
     private CancellationTokenSource? _cts;
     
     private static readonly TimeSpan PollingInterval = TimeSpan.FromMinutes(7);
@@ -22,13 +23,18 @@ public class PollingStrategy : IMatchNotification
     private const int MaxConcurrentChecks = 3;
 
     /// <summary>
-    /// Creates a new polling strategy instance.
+    /// Creates a new polling strategy with LoL and optional TFT match callbacks.
     /// </summary>
-    public PollingStrategy(RiotService riot, IUserRegistry userRegistry, Func<RiotAccount, MatchData, CancellationToken, Task> onNewMatchFound)
+    public PollingStrategy(
+        RiotService riot,
+        IUserRegistry userRegistry,
+        Func<RiotAccount, MatchData, CancellationToken, Task> onNewMatchFound,
+        Func<RiotAccount, TftMatchData, CancellationToken, Task>? onNewTftMatchFound = null)
     {
         _riot = riot;
         _userRegistry = userRegistry;
-        _onNewMatchFound = onNewMatchFound; 
+        _onNewMatchFound = onNewMatchFound;
+        _onNewTftMatchFound = onNewTftMatchFound;
     }
 
     /// <summary>
@@ -137,11 +143,8 @@ public class PollingStrategy : IMatchNotification
     }
 
     /// <summary>
-    /// Fetches the latest match for a specific account and triggers the notification if a new match is detected.
+    /// Fetches the latest LoL and TFT matches for a specific account and triggers notifications for new ones.
     /// </summary>
-    /// <param name="discordUserId">The Discord user's ID for registry updates.</param>
-    /// <param name="account">The Riot account to check.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
     private async Task ProcessSingleUserMatchAsync(ulong discordUserId, RiotAccount account, CancellationToken cancellationToken)
     {
         try
@@ -150,22 +153,39 @@ public class PollingStrategy : IMatchNotification
             
             string? currentMatchId = await _riot.GetLatestMatchIdAsync(account.puuid, cancellationToken);
 
-            if (string.IsNullOrEmpty(currentMatchId) || currentMatchId == account.LastMatchId)
+            if (!string.IsNullOrEmpty(currentMatchId) && currentMatchId != account.LastMatchId)
             {
-                return;
+                cancellationToken.ThrowIfCancellationRequested();
+                
+                var matchData = await _riot.GetMatchDetailsAsync(currentMatchId, cancellationToken);
+                
+                if (matchData != null)
+                {
+                    _userRegistry.UpdateLastMatchId(discordUserId, currentMatchId);
+                    await _onNewMatchFound(account, matchData, cancellationToken);
+                    Log.Information("New LoL match detected for {PlayerName}: {MatchId}", account.gameName, currentMatchId);
+                }
             }
-            
-            cancellationToken.ThrowIfCancellationRequested();
-            
-            var matchData = await _riot.GetMatchDetailsAsync(currentMatchId, cancellationToken);
-            
-            if (matchData != null)
+
+            if (_onNewTftMatchFound != null)
             {
-                _userRegistry.UpdateLastMatchId(discordUserId, currentMatchId);
+                cancellationToken.ThrowIfCancellationRequested();
                 
-                await _onNewMatchFound(account, matchData, cancellationToken);
-                
-                Log.Information("New match detected for {PlayerName}: {MatchId}", account.gameName, currentMatchId);
+                string? currentTftMatchId = await _riot.GetLatestTftMatchIdAsync(account.puuid, cancellationToken);
+
+                if (!string.IsNullOrEmpty(currentTftMatchId) && currentTftMatchId != account.LastTftMatchId)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    
+                    var tftMatchData = await _riot.GetTftMatchDetailsAsync(currentTftMatchId, cancellationToken);
+                    
+                    if (tftMatchData != null)
+                    {
+                        _userRegistry.UpdateLastTftMatchId(discordUserId, currentTftMatchId);
+                        await _onNewTftMatchFound(account, tftMatchData, cancellationToken);
+                        Log.Information("New TFT match detected for {PlayerName}: {MatchId}", account.gameName, currentTftMatchId);
+                    }
+                }
             }
         }
         catch (OperationCanceledException)

@@ -1,4 +1,4 @@
-﻿using Discord_Bot_AI.Models;
+﻿﻿using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Infrastructure;
 using System.Net;
 using System.Net.Http.Json;
@@ -85,14 +85,32 @@ public class RiotService : IDisposable
     /// <summary>
     /// Gets detailed match information based on match ID.
     /// </summary>
-    /// <param name="matchId">The unique match identifier.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <returns>Detailed match data or null if not found.</returns>
     public async Task<MatchData?> GetMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
     {
         var encodedMatchId = Uri.EscapeDataString(matchId);
         var url = $"https://europe.api.riotgames.com/lol/match/v5/matches/{encodedMatchId}";
         return await ExecuteWithRateLimitingAsync<MatchData>(url, cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets the latest TFT match ID for a given player's PUUID.
+    /// </summary>
+    public async Task<string?> GetLatestTftMatchIdAsync(string puuid, CancellationToken cancellationToken = default)
+    {
+        var encodedPuuid = Uri.EscapeDataString(puuid);
+        var url = $"https://europe.api.riotgames.com/tft/match/v1/matches/by-puuid/{encodedPuuid}/ids?start=0&count=1";
+        var matchIds = await ExecuteWithRateLimitingAsync<List<string>>(url, cancellationToken);
+        return matchIds?.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Gets detailed TFT match information based on match ID.
+    /// </summary>
+    public async Task<TftMatchData?> GetTftMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
+    {
+        var encodedMatchId = Uri.EscapeDataString(matchId);
+        var url = $"https://europe.api.riotgames.com/tft/match/v1/matches/{encodedMatchId}";
+        return await ExecuteWithRateLimitingAsync<TftMatchData>(url, cancellationToken);
     }
 
     /// <summary>
