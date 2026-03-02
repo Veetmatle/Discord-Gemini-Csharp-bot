@@ -292,7 +292,7 @@ public class BotService : IAsyncDisposable
     /// </summary>
     private void InitializeNotificationStrategies()
     {
-        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync, NotifyTftMatchFinishedAsync));
+        _notificationStrategies.Add(new PollingStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
         _notificationStrategies.Add(new CommandStrategy(_riot, _userRegistry, NotifyMatchFinishedAsync));
         Log.Information("Notification strategies initialized: {Count}", _notificationStrategies.Count);
     }
