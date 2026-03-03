@@ -21,6 +21,7 @@
       <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
       <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
       <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="2.1.7" />
+      <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
     </ItemGroup>
 
     <ItemGroup>

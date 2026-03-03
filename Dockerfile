@@ -24,7 +24,7 @@ WORKDIR /app
 
 # Utworzenie użytkownika i struktury folderów
 RUN groupadd -r botuser && useradd -r -g botuser botuser
-RUN mkdir -p /app/data /app/cache/champions /app/cache/items /app/logs
+RUN mkdir -p /app/data /app/cache/champions /app/cache/items /app/logs /app/agent-output
 
 
 # 1. Kopiowanie opublikowanej aplikacji

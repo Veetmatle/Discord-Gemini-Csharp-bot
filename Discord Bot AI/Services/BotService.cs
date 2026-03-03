@@ -3,6 +3,7 @@ using Discord;
 using Discord.WebSocket;
 using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Configuration;
+using Discord_Bot_AI.Services.Agent;
 using Discord_Bot_AI.Strategy.Notification;
 using Discord_Bot_AI.Strategy.Rendering;
 using Microsoft.Extensions.DependencyInjection;
@@ -28,6 +29,7 @@ public class BotService : IAsyncDisposable
     private readonly IGuildConfigRegistry _guildConfigRegistry;
     private readonly PolitechnikaService _politechnika;
     private readonly PolitechnikaWatcherService _politechnikaWatcher;
+    private readonly IAgentService _agentService;
     private readonly List<IMatchNotification> _notificationStrategies = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private DateTime _startTime;
@@ -50,6 +52,7 @@ public class BotService : IAsyncDisposable
         _guildConfigRegistry = serviceProvider.GetRequiredService<IGuildConfigRegistry>();
         _politechnika = serviceProvider.GetRequiredService<PolitechnikaService>();
         _politechnikaWatcher = serviceProvider.GetRequiredService<PolitechnikaWatcherService>();
+        _agentService = serviceProvider.GetRequiredService<IAgentService>();
         
         var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent };
         _client = new DiscordSocketClient(config);
@@ -279,6 +282,7 @@ public class BotService : IAsyncDisposable
         
         var stopTasks = _notificationStrategies.Select(s => s.StopMonitoringAsync()).ToList();
         stopTasks.Add(_politechnikaWatcher.StopWatchingAsync());
+        stopTasks.Add(_agentService.StopAsync());
         await Task.WhenAll(stopTasks);
         
         await _client.StopAsync();
@@ -314,6 +318,9 @@ public class BotService : IAsyncDisposable
         
         _politechnikaWatcher.OnChangeDetected = HandlePolitechnikaChangeAsync;
         _ = _politechnikaWatcher.StartWatchingAsync(_shutdownCts.Token);
+        
+        _agentService.OnTaskCompleted = HandleAgentTaskCompletedAsync;
+        _ = _agentService.StartAsync(_shutdownCts.Token);
     }
 
     /// <summary>
@@ -427,6 +434,12 @@ public class BotService : IAsyncDisposable
                 .WithName("pk-watch-stop")
                 .WithDescription("Stop watching for schedule updates on this channel")
                 .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("agent-task")
+                .WithDescription("Submit a task to the AI agent (code generation, analysis, etc.)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("prompt", ApplicationCommandOptionType.String, "Describe the task for the agent", isRequired: true)
+                .AddOption("attachment", ApplicationCommandOptionType.Attachment, "Attach a PDF specification (optional)", isRequired: false))
             .Build();
 
         try
@@ -483,6 +496,9 @@ public class BotService : IAsyncDisposable
                         break;
                     case "pk-watch-stop":
                         await HandlePkWatchStopAsync(command);
+                        break;
+                    case "agent-task":
+                        await HandleAgentTaskCommandAsync(command, subCommand);
                         break;
                 }
             }
@@ -1336,6 +1352,168 @@ public class BotService : IAsyncDisposable
             {
                 Log.Error(ex, "Failed to send PK notification to channel {ChannelId}", subscription.ChannelId);
             }
+        }
+    }
+
+    /// <summary>
+    /// Handles the agent-task slash command. Defers immediately, parses PDF if attached, submits to agent queue.
+    /// </summary>
+    private async Task HandleAgentTaskCommandAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
+    {
+        await command.DeferAsync();
+        
+        var guildId = command.GuildId;
+        if (guildId == null)
+        {
+            await command.FollowupAsync("This command must be used in a server.");
+            return;
+        }
+
+        var promptOption = subCommand.Options.FirstOrDefault(o => o.Name == "prompt");
+        var attachmentOption = subCommand.Options.FirstOrDefault(o => o.Name == "attachment");
+        
+        var prompt = promptOption?.Value?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            await command.FollowupAsync("Please provide a task description.");
+            return;
+        }
+
+        Stream? pdfStream = null;
+        string? pdfFileName = null;
+
+        try
+        {
+            if (attachmentOption?.Value is IAttachment attachment)
+            {
+                if (attachment.ContentType?.Contains("pdf", StringComparison.OrdinalIgnoreCase) == true
+                    || attachment.Filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var httpClient = new HttpClient();
+                    var bytes = await httpClient.GetByteArrayAsync(attachment.Url, _shutdownCts.Token);
+                    pdfStream = new MemoryStream(bytes);
+                    pdfFileName = attachment.Filename;
+                }
+                else
+                {
+                    await command.FollowupAsync("Only PDF attachments are supported for agent tasks. Your task will proceed without the attachment.");
+                }
+            }
+
+            var taskId = await _agentService.SubmitTaskAsync(
+                command.User.Id,
+                guildId.Value,
+                command.Channel.Id,
+                prompt,
+                pdfStream,
+                pdfFileName,
+                _shutdownCts.Token);
+
+            var response = new System.Text.StringBuilder();
+            response.AppendLine($"**Task accepted, ID: #{taskId}**");
+            response.AppendLine($"Prompt: {(prompt.Length > 100 ? prompt[..100] + "..." : prompt)}");
+            if (pdfFileName != null)
+                response.AppendLine($"Attachment: {pdfFileName}");
+            response.AppendLine();
+            response.AppendLine("You will be notified when the agent completes the task.");
+
+            await command.FollowupAsync(response.ToString());
+        }
+        catch (InvalidOperationException ex)
+        {
+            await command.FollowupAsync($"Task rejected: {ex.Message}");
+        }
+        finally
+        {
+            if (pdfStream != null)
+                await pdfStream.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Callback invoked when the agent orchestrator completes a task.
+    /// Delivers results (files and/or summary) to the Discord channel where the task was submitted.
+    /// </summary>
+    private async Task HandleAgentTaskCompletedAsync(AgentTaskResult result, AgentTask task, CancellationToken ct)
+    {
+        var guild = _client.GetGuild(task.GuildId);
+        if (guild == null)
+        {
+            Log.Warning("Guild {GuildId} not found for agent task {TaskId} delivery", task.GuildId, task.Id);
+            return;
+        }
+
+        var channel = guild.GetTextChannel(task.ChannelId);
+        if (channel == null)
+        {
+            Log.Warning("Channel {ChannelId} not found for agent task {TaskId} delivery", task.ChannelId, task.Id);
+            return;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"<@{task.DiscordUserId}> **Agent task #{task.Id} completed.**");
+
+        if (result.Success)
+        {
+            if (!string.IsNullOrWhiteSpace(result.Summary))
+                sb.AppendLine($"**Summary:** {result.Summary}");
+
+            if (result.OutputFiles.Count > 0)
+            {
+                sb.AppendLine($"**Output files:** {result.OutputFiles.Count}");
+
+                var attachments = new List<FileAttachment>();
+                foreach (var file in result.OutputFiles)
+                {
+                    if (file.SizeBytes > 25 * 1024 * 1024)
+                    {
+                        sb.AppendLine($"*{file.FileName}* - too large for Discord ({file.SizeBytes / 1024 / 1024}MB)");
+                        continue;
+                    }
+
+                    try
+                    {
+                        var stream = File.OpenRead(file.FilePath);
+                        attachments.Add(new FileAttachment(stream, file.FileName));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Could not read output file {FilePath}", file.FilePath);
+                        sb.AppendLine($"*{file.FileName}* - could not read file");
+                    }
+                }
+
+                if (attachments.Count > 0)
+                {
+                    await channel.SendFilesAsync(attachments, sb.ToString(),
+                        options: new RequestOptions { CancelToken = ct });
+
+                    foreach (var att in attachments)
+                        att.Dispose();
+                    return;
+                }
+            }
+            else
+            {
+                sb.AppendLine("No output files were generated.");
+            }
+        }
+        else
+        {
+            sb.AppendLine($"**Status:** Failed");
+            if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
+                sb.AppendLine($"**Error:** {result.ErrorMessage}");
+            if (!string.IsNullOrWhiteSpace(result.Summary))
+                sb.AppendLine($"**Details:** {result.Summary}");
+        }
+
+        try
+        {
+            await channel.SendMessageAsync(sb.ToString(), options: new RequestOptions { CancelToken = ct });
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to deliver agent task result {TaskId} to channel", task.Id);
         }
     }
 

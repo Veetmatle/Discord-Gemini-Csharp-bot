@@ -1,4 +1,13 @@
-﻿services:
+﻿# ============================================================
+# Discord Bot AI - Production Docker Compose (VM 2GB RAM)
+# ============================================================
+# Uses pre-built image from Docker Hub for openclaw agent
+# ============================================================
+
+services:
+  # --------------------------------------------------------
+  # Discord Bot (C# .NET 9.0)
+  # --------------------------------------------------------
   discord-bot:
     build:
       context: .
@@ -7,13 +16,13 @@
     restart: unless-stopped
     depends_on:
       openclaw:
-        condition: service_started
-    
-    # Environment variables from .env file
+        condition: service_healthy
+
+    # Load secrets from .env file
     env_file:
       - .env
-    
-    # Agent connection settings (override defaults from AppSettings)
+
+    # Runtime environment configuration
     environment:
       - OPENCLAW_BASE_URL=http://openclaw:8080
       - AGENT_SHARED_VOLUME_PATH=/app/agent-output
@@ -21,18 +30,19 @@
       - AGENT_MAX_RETRIES=${AGENT_MAX_RETRIES:-3}
       - AGENT_MAX_CONCURRENT_TASKS=${AGENT_MAX_CONCURRENT_TASKS:-2}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
-    
-    # Persistent volumes for data, logs and shared agent output
-    # NOTE: bot-cache is NOT mounted - static assets are baked into the image
+
+    # Persistent volumes
+    # NOTE: bot-cache is NOT mounted to preserve static assets baked into the image
+    # The cache directory inside the container already contains champion/item icons
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
-      - agent-output:/app/agent-output:ro   # Read-only: bot only reads agent results
-    
+      - agent-output:/app/agent-output:ro
+
     networks:
       - bot-internal
-    
-    # Resource limits
+
+    # Resource limits for 2GB VM (bot gets 512MB max)
     deploy:
       resources:
         limits:
@@ -41,34 +51,35 @@
         reservations:
           cpus: '0.25'
           memory: 128M
-    
-    # Graceful shutdown timeout
+
+    # Graceful shutdown
     stop_grace_period: 30s
-    
-    # Security options
+
+    # Security hardening
     security_opt:
       - no-new-privileges:true
     read_only: true
     tmpfs:
       - /tmp:size=64M
       - /home/botuser:size=16M
-    
-    # Logging configuration
+
+    # Log rotation
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
+  # --------------------------------------------------------
+  # OpenClaw Agent (Python + Claude API)
+  # Pre-built image from Docker Hub
+  # --------------------------------------------------------
   openclaw:
-    # Build custom agent image with .NET SDK and Python for code compilation
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
+    image: ahmanamjardir/openclaw-agent:1.0
     container_name: openclaw-agent
     restart: unless-stopped
-    
-    # Agent API key from .env
+
+    # Agent configuration
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-exp}
@@ -77,48 +88,59 @@
       - AGENT_SESSION_TIMEOUT_MINUTES=${AGENT_SESSION_TIMEOUT_MINUTES:-10}
       - MAX_CONCURRENT_TASKS=${AGENT_MAX_CONCURRENT_TASKS:-2}
       - WORKSPACE_DIR=/workspace
-      # Development tools available in container
       - DOTNET_ROOT=/usr/share/dotnet
       - PATH=/opt/venv/bin:/usr/share/dotnet:$PATH
-    
+
     # Agent writes results to shared volume
     volumes:
       - agent-output:/workspace:rw
-    
+
     networks:
       - bot-internal
-    
-    # Resource limits (agent needs more CPU/memory for .NET/Python compilation)
+
+    # Resource limits for 2GB VM (agent gets 1.5GB max)
     deploy:
       resources:
         limits:
           cpus: '2.0'
-          memory: 2G
+          memory: 1536M
         reservations:
           cpus: '0.5'
           memory: 512M
-    
-    # Kill agent container if it hangs
+
+    # Graceful shutdown
     stop_grace_period: 15s
-    
-    # Security: no privilege escalation, no host network
+
+    # Security hardening
     security_opt:
       - no-new-privileges:true
-    
-    # Logging
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Log rotation
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-# Internal network - containers communicate without exposing ports to host
+# ============================================================
+# Networks
+# ============================================================
 networks:
   bot-internal:
     driver: bridge
     name: discord-bot-network
 
-# Named volumes for data persistence
+# ============================================================
+# Volumes (persistent data)
+# ============================================================
 volumes:
   bot-data:
     name: discord-bot-data

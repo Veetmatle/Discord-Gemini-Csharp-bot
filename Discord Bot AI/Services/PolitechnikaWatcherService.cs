@@ -16,7 +16,6 @@ public class PolitechnikaWatcherService : IDisposable
     private readonly string _statePath;
     
     private readonly SemaphoreSlim _stateLock = new(1, 1);
-    private readonly ReaderWriterLockSlim _fileLock = new();
     
     private CancellationTokenSource? _watcherCts;
     private Task? _watcherTask;
@@ -349,16 +348,20 @@ public class PolitechnikaWatcherService : IDisposable
         await _stateLock.WaitAsync(ct);
         try
         {
-            _fileLock.EnterReadLock();
-            try
+            if (!File.Exists(_statePath))
             {
-                if (!File.Exists(_statePath)) { _state = new WatcherState(); return; }
-                var json = await File.ReadAllTextAsync(_statePath, ct);
-                _state = JsonSerializer.Deserialize<WatcherState>(json) ?? new WatcherState();
+                _state = new WatcherState();
+                return;
             }
-            finally { _fileLock.ExitReadLock(); }
+
+            var json = await File.ReadAllTextAsync(_statePath, ct);
+            _state = JsonSerializer.Deserialize<WatcherState>(json) ?? new WatcherState();
         }
-        catch { _state = new WatcherState(); }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to load PK watcher state, starting fresh");
+            _state = new WatcherState();
+        }
         finally { _stateLock.Release(); }
     }
 
@@ -371,15 +374,19 @@ public class PolitechnikaWatcherService : IDisposable
     
     private async Task SaveStateInternalAsync(CancellationToken ct)
     {
-        _fileLock.EnterWriteLock();
         try
         {
             var dir = Path.GetDirectoryName(_statePath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) 
+                Directory.CreateDirectory(dir);
+            
             var json = JsonSerializer.Serialize(_state, new JsonSerializerOptions { WriteIndented = true });
             await File.WriteAllTextAsync(_statePath, json, ct);
         }
-        finally { _fileLock.ExitWriteLock(); }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to save PK watcher state");
+        }
     }
 
     public void Dispose()
@@ -388,7 +395,6 @@ public class PolitechnikaWatcherService : IDisposable
         _watcherCts?.Cancel();
         _watcherCts?.Dispose();
         _stateLock.Dispose();
-        _fileLock.Dispose();
         _disposed = true;
     }
 }

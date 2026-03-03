@@ -2,6 +2,7 @@
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Data;
 using Discord_Bot_AI.Services;
+using Discord_Bot_AI.Services.Agent;
 using Discord_Bot_AI.Strategy.Rendering;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
@@ -45,6 +46,14 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IHttpClientFactory>(),
             settings.DataPath));
         
+        // Register agent subsystem
+        services.AddOpenClawHttpClient(settings);
+        services.AddSingleton<IPdfParser, PdfTextExtractor>();
+        services.AddSingleton<IPromptSanitizer, PromptSanitizer>();
+        services.AddSingleton<IAgentClient, OpenClawAgentClient>();
+        services.AddSingleton<IAgentOrchestrator, AgentOrchestrator>();
+        services.AddSingleton<IAgentService, AgentService>();
+        
         return services;
     }
 
@@ -74,6 +83,19 @@ public static class ServiceCollectionExtensions
                 client.Timeout = TimeSpan.FromSeconds(30);
             })
             .AddPolicyHandler(GetRetryPolicy("Gemini"));
+    }
+
+    /// <summary>
+    /// Configures the OpenClaw agent API HTTP client with extended timeout and retry policies.
+    /// </summary>
+    private static void AddOpenClawHttpClient(this IServiceCollection services, AppSettings settings)
+    {
+        services.AddHttpClient(HttpClientNames.OpenClawApi, client =>
+            {
+                client.BaseAddress = new Uri(settings.OpenClawBaseUrl);
+                client.Timeout = TimeSpan.FromMinutes(settings.AgentSessionTimeoutMinutes + 1);
+            })
+            .AddPolicyHandler(GetRetryPolicy("OpenClaw"));
     }
 
     /// <summary>
@@ -114,4 +136,5 @@ public static class HttpClientNames
 {
     public const string RiotApi = "RiotApi";
     public const string GeminiApi = "GeminiApi";
+    public const string OpenClawApi = "OpenClawApi";
 }
