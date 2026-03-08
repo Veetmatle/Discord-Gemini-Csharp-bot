@@ -268,7 +268,8 @@ public class AgentOrchestrator : IAgentOrchestrator, IDisposable
         {
             TaskId = response.TaskId,
             Success = true,
-            Summary = response.Message
+            Summary = response.Message,
+            DirectResponse = response.DirectResponse,   
         };
 
         if (response.OutputFiles != null)

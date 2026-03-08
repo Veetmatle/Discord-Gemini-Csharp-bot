@@ -43,6 +43,12 @@ public class AgentTaskResult
     public List<AgentOutputFile> OutputFiles { get; set; } = new();
     public string? ErrorMessage { get; set; }
     public string? Summary { get; set; }
+
+    /// <summary>
+    /// Plain-text answer returned by the agent instead of a file.
+    /// Non-null when the agent resolved the task without producing output files.
+    /// </summary>
+    public string? DirectResponse { get; set; }
 }
 
 /// <summary>
@@ -62,19 +68,19 @@ public class AgentApiRequest
 {
     [JsonPropertyName("TaskId")]
     public string TaskId { get; set; } = string.Empty;
-    
+
     [JsonPropertyName("Prompt")]
     public string Prompt { get; set; } = string.Empty;
-    
+
     [JsonPropertyName("DocumentContent")]
     public string? DocumentContent { get; set; }
-    
+
     [JsonPropertyName("Model")]
     public string Model { get; set; } = "claude-sonnet-4-20250514";
-    
+
     [JsonPropertyName("MaxIterations")]
     public int MaxIterations { get; set; } = 7;
-    
+
     [JsonPropertyName("TimeoutSeconds")]
     public int TimeoutSeconds { get; set; } = 600;
 }
@@ -86,16 +92,19 @@ public class AgentApiResponse
 {
     [JsonPropertyName("TaskId")]
     public string TaskId { get; set; } = string.Empty;
-    
+
     [JsonPropertyName("Status")]
     public string Status { get; set; } = string.Empty;
-    
+
     [JsonPropertyName("Message")]
     public string? Message { get; set; }
-    
+
     [JsonPropertyName("OutputFiles")]
     public List<string>? OutputFiles { get; set; }
     
+    [JsonPropertyName("DirectResponse")]
+    public string? DirectResponse { get; set; }
+
     [JsonPropertyName("Error")]
     public string? Error { get; set; }
 }

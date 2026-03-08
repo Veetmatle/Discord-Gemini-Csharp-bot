@@ -426,14 +426,6 @@ public class BotService : IAsyncDisposable
                 .WithDescription("Search Politechnika Krakowska WIiT resources (plans, schedules, documents)")
                 .WithType(ApplicationCommandOptionType.SubCommand)
                 .AddOption("query", ApplicationCommandOptionType.String, "What are you looking for? (e.g. 'plan zajęć informatyka I stopień')", isRequired: true))
-            // .AddOption(new SlashCommandOptionBuilder()
-            //     .WithName("pk-watch-start")
-            //     .WithDescription("Start watching for schedule updates on this channel")
-            //     .WithType(ApplicationCommandOptionType.SubCommand))
-            // .AddOption(new SlashCommandOptionBuilder()
-            //     .WithName("pk-watch-stop")
-            //     .WithDescription("Stop watching for schedule updates on this channel")
-            //     .WithType(ApplicationCommandOptionType.SubCommand))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("agent-task")
                 .WithDescription("Submit a task to the AI agent (code generation, analysis, etc.)")
@@ -1430,92 +1422,103 @@ public class BotService : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// Callback invoked when the agent orchestrator completes a task.
-    /// Delivers results (files and/or summary) to the Discord channel where the task was submitted.
-    /// </summary>
     private async Task HandleAgentTaskCompletedAsync(AgentTaskResult result, AgentTask task, CancellationToken ct)
+{
+    var guild = _client.GetGuild(task.GuildId);
+    if (guild == null)
     {
-        var guild = _client.GetGuild(task.GuildId);
-        if (guild == null)
+        Log.Warning("Guild {GuildId} not found for agent task {TaskId} delivery", task.GuildId, task.Id);
+        return;
+    }
+
+    var channel = guild.GetTextChannel(task.ChannelId);
+    if (channel == null)
+    {
+        Log.Warning("Channel {ChannelId} not found for agent task {TaskId} delivery", task.ChannelId, task.Id);
+        return;
+    }
+
+    if (!result.Success)
+    {
+        var errorMsg = $"<@{task.DiscordUserId}> **Agent task #{task.Id} failed.**\n" +
+                       $"{result.ErrorMessage ?? "Unknown error."}";
+        await channel.SendMessageAsync(errorMsg, options: new RequestOptions { CancelToken = ct });
+        return;
+    }
+
+    var mention = $"<@{task.DiscordUserId}>";
+
+    if (!string.IsNullOrWhiteSpace(result.DirectResponse))
+    {
+        var response = result.DirectResponse!;
+
+        if (response.Length <= 1900)
         {
-            Log.Warning("Guild {GuildId} not found for agent task {TaskId} delivery", task.GuildId, task.Id);
-            return;
-        }
-
-        var channel = guild.GetTextChannel(task.ChannelId);
-        if (channel == null)
-        {
-            Log.Warning("Channel {ChannelId} not found for agent task {TaskId} delivery", task.ChannelId, task.Id);
-            return;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"<@{task.DiscordUserId}> **Agent task #{task.Id} completed.**");
-
-        if (result.Success)
-        {
-            if (!string.IsNullOrWhiteSpace(result.Summary))
-                sb.AppendLine($"**Summary:** {result.Summary}");
-
-            if (result.OutputFiles.Count > 0)
-            {
-                sb.AppendLine($"**Output files:** {result.OutputFiles.Count}");
-
-                var attachments = new List<FileAttachment>();
-                foreach (var file in result.OutputFiles)
-                {
-                    if (file.SizeBytes > 25 * 1024 * 1024)
-                    {
-                        sb.AppendLine($"*{file.FileName}* - too large for Discord ({file.SizeBytes / 1024 / 1024}MB)");
-                        continue;
-                    }
-
-                    try
-                    {
-                        var stream = File.OpenRead(file.FilePath);
-                        attachments.Add(new FileAttachment(stream, file.FileName));
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "Could not read output file {FilePath}", file.FilePath);
-                        sb.AppendLine($"*{file.FileName}* - could not read file");
-                    }
-                }
-
-                if (attachments.Count > 0)
-                {
-                    await channel.SendFilesAsync(attachments, sb.ToString(),
-                        options: new RequestOptions { CancelToken = ct });
-
-                    foreach (var att in attachments)
-                        att.Dispose();
-                    return;
-                }
-            }
-            else
-            {
-                sb.AppendLine("No output files were generated.");
-            }
+            await channel.SendMessageAsync($"{mention}\n{response}",
+                options: new RequestOptions { CancelToken = ct });
         }
         else
         {
-            sb.AppendLine($"**Status:** Failed");
-            if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
-                sb.AppendLine($"**Error:** {result.ErrorMessage}");
-            if (!string.IsNullOrWhiteSpace(result.Summary))
-                sb.AppendLine($"**Details:** {result.Summary}");
+            await channel.SendMessageAsync($"{mention} **Agent task #{task.Id} completed.**",
+                options: new RequestOptions { CancelToken = ct });
+
+            for (int offset = 0; offset < response.Length; offset += 1900)
+            {
+                var chunk = response.Substring(offset, Math.Min(1900, response.Length - offset));
+                await channel.SendMessageAsync(chunk, options: new RequestOptions { CancelToken = ct });
+            }
+        }
+        return;
+    }
+
+    var sb = new System.Text.StringBuilder();
+    sb.AppendLine($"{mention} **Agent task #{task.Id} completed.**");
+
+    if (!string.IsNullOrWhiteSpace(result.Summary))
+        sb.AppendLine($"**Summary:** {result.Summary}");
+
+    if (result.OutputFiles.Count == 0)
+    {
+        sb.AppendLine("No output files were generated.");
+        await channel.SendMessageAsync(sb.ToString(), options: new RequestOptions { CancelToken = ct });
+        return;
+    }
+
+    sb.AppendLine($"**Output files:** {result.OutputFiles.Count}");
+
+    var attachments = new List<FileAttachment>();
+    foreach (var file in result.OutputFiles)
+    {
+        if (file.SizeBytes > 25 * 1024 * 1024)
+        {
+            sb.AppendLine($"*{file.FileName}* — too large for Discord ({file.SizeBytes / 1024 / 1024} MB)");
+            continue;
         }
 
         try
         {
-            await channel.SendMessageAsync(sb.ToString(), options: new RequestOptions { CancelToken = ct });
+            var stream = File.OpenRead(file.FilePath);
+            attachments.Add(new FileAttachment(stream, file.FileName));
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Failed to deliver agent task result {TaskId} to channel", task.Id);
+            Log.Warning(ex, "Could not read output file {FilePath}", file.FilePath);
+            sb.AppendLine($"*{file.FileName}* — could not read file");
         }
     }
+
+    if (attachments.Count > 0)
+    {
+        await channel.SendFilesAsync(attachments, sb.ToString(),
+            options: new RequestOptions { CancelToken = ct });
+        foreach (var att in attachments)
+            att.Dispose();
+    }
+    else
+    {
+        await channel.SendMessageAsync(sb.ToString(), options: new RequestOptions { CancelToken = ct });
+    }
+}
 
     /// <summary>
     /// Releases all resources used by the bot service.
