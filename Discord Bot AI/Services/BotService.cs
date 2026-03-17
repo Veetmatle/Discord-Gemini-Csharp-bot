@@ -1440,7 +1440,6 @@ public class BotService : IAsyncDisposable
  
         var mention = $"<@{task.DiscordUserId}>";
  
-        // Task failed
         if (!result.Success)
         {
             await channel.SendMessageAsync(
@@ -1449,85 +1448,92 @@ public class BotService : IAsyncDisposable
             return;
         }
  
-        // Direct text answer (no files)
-        if (!string.IsNullOrWhiteSpace(result.DirectResponse))
+        var hasFiles = result.OutputFiles.Count > 0;
+        var hasText = !string.IsNullOrWhiteSpace(result.DirectResponse);
+ 
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"{mention} **Agent task #{task.Id} completed.**");
+        if (!string.IsNullOrWhiteSpace(result.Summary))
+            sb.Append($"\n**Summary:** {result.Summary}");
+ 
+        if (hasFiles)
         {
-            var response = result.DirectResponse!;
-            if (response.Length <= 1900)
+            const long DiscordMaxBytes = 25 * 1024 * 1024;
+ 
+            var attachments = new List<FileAttachment>();
+            var streams = new List<MemoryStream>();
+ 
+            foreach (var file in result.OutputFiles)
             {
-                await channel.SendMessageAsync($"{mention}\n{response}",
-                    options: new RequestOptions { CancelToken = ct });
-            }
-            else
-            {
-                await channel.SendMessageAsync($"{mention} **Agent task #{task.Id} completed.**",
-                    options: new RequestOptions { CancelToken = ct });
-                for (int offset = 0; offset < response.Length; offset += 1900)
+                if (file.TooLarge || file.SizeBytes > DiscordMaxBytes)
                 {
-                    var chunk = response.Substring(offset, Math.Min(1900, response.Length - offset));
-                    await channel.SendMessageAsync(chunk, options: new RequestOptions { CancelToken = ct });
+                    sb.Append($"\n *{file.FileName}* — too large to send ({file.SizeBytes / 1024 / 1024} MB)");
+                    continue;
+                }
+ 
+                var bytes = file.GetBytes();
+                if (bytes.Length == 0)
+                {
+                    sb.Append($"\n *{file.FileName}* — empty or missing content");
+                    continue;
+                }
+ 
+                var stream = new MemoryStream(bytes);
+                streams.Add(stream);
+                attachments.Add(new FileAttachment(stream, file.FileName));
+            }
+ 
+            try
+            {
+                if (attachments.Count > 0)
+                {
+                    await channel.SendFilesAsync(attachments, sb.ToString(),
+                        options: new RequestOptions { CancelToken = ct });
+                }
+                else
+                {
+                    await channel.SendMessageAsync(sb.ToString(),
+                        options: new RequestOptions { CancelToken = ct });
                 }
             }
-            return;
-        }
- 
-        // Files
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"{mention} **Agent task #{task.Id} completed.**");
- 
-        if (!string.IsNullOrWhiteSpace(result.Summary))
-            sb.AppendLine($"**Summary:** {result.Summary}");
- 
-        if (result.OutputFiles.Count == 0)
-        {
-            sb.AppendLine("No output files were generated.");
-            await channel.SendMessageAsync(sb.ToString(), options: new RequestOptions { CancelToken = ct });
-            return;
-        }
- 
-        const long DiscordMaxBytes = 25 * 1024 * 1024; // 25 MB
- 
-        var attachments = new List<FileAttachment>();
-        var streams = new List<MemoryStream>();
- 
-        foreach (var file in result.OutputFiles)
-        {
-            // File too large for OpenClaw to send inline
-            if (file.TooLarge || file.SizeBytes > DiscordMaxBytes)
+            finally
             {
-                sb.AppendLine($"️ *{file.FileName}* — too large to send ({file.SizeBytes / 1024 / 1024} MB)");
-                continue;
+                foreach (var att in attachments) att.Dispose();
+                foreach (var s in streams) await s.DisposeAsync();
             }
- 
-            var bytes = file.GetBytes();
-            if (bytes.Length == 0)
-            {
-                sb.AppendLine($"⚠ *{file.FileName}* — empty or missing content");
-                continue;
-            }
- 
-            var stream = new MemoryStream(bytes);
-            streams.Add(stream);
-            attachments.Add(new FileAttachment(stream, file.FileName));
         }
  
-        try
+        if (hasText)
         {
-            if (attachments.Count > 0)
+            var response = hasFiles
+                ? result.DirectResponse!
+                : $"{sb}\n\n{result.DirectResponse}";
+ 
+            if (response.Length <= 1900)
             {
-                await channel.SendFilesAsync(attachments, sb.ToString(),
+                await channel.SendMessageAsync(response,
                     options: new RequestOptions { CancelToken = ct });
             }
             else
             {
-                await channel.SendMessageAsync(sb.ToString(),
-                    options: new RequestOptions { CancelToken = ct });
+                if (!hasFiles)
+                {
+                    await channel.SendMessageAsync(sb.ToString(),
+                        options: new RequestOptions { CancelToken = ct });
+                }
+                for (int offset = 0; offset < result.DirectResponse!.Length; offset += 1900)
+                {
+                    var chunk = result.DirectResponse.Substring(offset, Math.Min(1900, result.DirectResponse.Length - offset));
+                    await channel.SendMessageAsync(chunk,
+                        options: new RequestOptions { CancelToken = ct });
+                }
             }
         }
-        finally
+ 
+        if (!hasFiles && !hasText)
         {
-            foreach (var att in attachments) att.Dispose();
-            foreach (var s in streams) await s.DisposeAsync();
+            await channel.SendMessageAsync($"{sb}\nNo output was generated.",
+                options: new RequestOptions { CancelToken = ct });
         }
     }
 
