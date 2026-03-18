@@ -1,682 +1,440 @@
-﻿# Discord Bot AI
+﻿# LaskBot
 
-Discord bot with League of Legends match tracking and Google Gemini AI integration. Built with .NET 9.0 and designed for Docker deployment.
+LaskBot is a Discord bot built with .NET 9.0. It tracks League of Legends and TFT matches, answers questions using Google Gemini AI, and runs an autonomous AI agent (OpenClaw) capable of executing code, generating charts, analysing data, and returning files directly to Discord.
 
-## Table of Contents
-
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Environment Variables](#environment-variables)
-- [Architecture Overview](#architecture-overview)
-- [Key Technical Features](#key-technical-features)
-- [Cancellation Token Flow](#cancellation-token-flow)
-- [Application Flow Scenarios](#application-flow-scenarios)
-- [Component Responsibilities](#component-responsibilities)
-- [Security](#security)
-- [Data Persistence](#data-persistence)
-- [Development](#development)
+The system runs as two Docker containers: the bot itself (C#) and the OpenClaw agent (Python). They communicate over an internal network via HTTP — no shared volumes.
 
 ---
 
-## Requirements
+## What it does
 
-- Docker and Docker Compose
-- Discord Bot Token (from Discord Developer Portal)
-- Google Gemini API Key
-- Riot Games API Key
+**League of Legends and TFT tracking** — register your Riot account and the bot automatically detects when you finish a match. It renders a post-game summary image (champion, KDA, CS, gold, damage, items sorted by role) and posts it to a configured channel. Both LoL and TFT are supported with separate renderers.
+
+**AI assistant** — `/laskbot ask` sends your question to Google Gemini with optional image or document attachment. The `!ask` text command supports multiple attachments at once, including images, PDFs, DOCX, XLSX, and more.
+
+**AI agent** — `/laskbot agent-task` submits a task to OpenClaw. The agent writes and executes code, calls external APIs, generates charts and reports, and sends the output files back to Discord. Tasks run asynchronously; you get notified when done.
+
+**Politechnika Krakowska integration** — `/laskbot pk` scrapes the WIiT faculty website and uses Gemini to find the most relevant document (schedule, syllabus, exam results) matching your query.
 
 ---
 
-## Quick Start
+## Commands
 
-### 1. Clone and configure
+| Command | Description |
+|---|---|
+| `/laskbot register nick tag` | Register your LoL account on this server |
+| `/laskbot unregister` | Remove your account from this server |
+| `/laskbot setup-channel channel` | Set the notification channel (admin only) |
+| `/laskbot check-latest-match` | Show your most recent LoL match |
+| `/laskbot check-latest-tft` | Show your most recent TFT match |
+| `/laskbot ask query [attachment]` | Ask Gemini AI with optional single attachment |
+| `/laskbot agent-task prompt [pdf]` | Run a task on the AI agent |
+| `/laskbot pk query` | Search WIiT Politechnika Krakowska resources |
+| `/laskbot pk-watch-start` | Subscribe this channel to schedule change alerts |
+| `/laskbot pk-watch-stop` | Unsubscribe this channel |
+| `/laskbot status` | Show uptime, tracked players, cache stats |
+| `!ask question` | Ask Gemini with multiple attachments |
+
+---
+
+## Quick start
 
 ```bash
 cp .env.example .env
-nano .env  # Edit with your API keys
-```
-
-### 2. Start the bot
-
-```bash
+# fill in your keys
 docker compose up -d
 ```
 
-### 3. Check logs
+Required environment variables:
 
-```bash
-docker compose logs -f
-```
-
-### 4. Stop the bot
-
-```bash
-docker compose down
-```
+| Variable | Description |
+|---|---|
+| `DISCORD_TOKEN` | Discord bot token |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `RIOT_TOKEN` | Riot Games API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key (for OpenClaw) |
 
 ---
 
-## Environment Variables
+## Architecture
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| DISCORD_TOKEN | Yes | Discord bot token |
-| GEMINI_API_KEY | Yes | Google Gemini API key |
-| RIOT_TOKEN | Yes | Riot Games API key |
-| RIOT_VERSION | No | Data Dragon version (default: 14.2.1) |
-| DATA_PATH | No | User data directory (default: /app/data) |
-| CACHE_PATH | No | Image cache directory (default: /app/cache) |
-| LOG_PATH | No | Log files directory (default: /app/logs) |
+```
+Discord
+  |
+  v
+discord-bot (C# .NET 9.0)              openclaw (Python 3.12)
+  |  - slash command handling             |  - Flask HTTP API
+  |  - match polling loop                 |  - Claude tool_use agent
+  |  - image rendering (ImageSharp)       |  - write_file / run_bash
+  |  - Gemini AI calls                    |  - mark_output
+  |  - agent task orchestration           |  - web_search (conditional)
+  |                                       |
+  |------- HTTP POST /tasks ------------->|
+  |------- HTTP GET /tasks/{id} -------->|
+  |<------ base64 files /tasks/{id}/files-|
+```
+
+The bot and agent run on an isolated internal Docker network (`internal: true`). The agent has a separate external network for Anthropic API calls and web access. No shared filesystem between containers.
 
 ---
 
-## Architecture Overview
+## OpenClaw agent
 
-```
-Discord Bot AI/
-├── Program.cs                 # Entry point, DI container setup
-├── Configuration/             # Settings and environment providers
-│   ├── AppSettings.cs         # Strongly-typed configuration
-│   ├── EnvironmentConfigProvider.cs
-│   └── IConfigurationProvider.cs
-├── Infrastructure/            # Cross-cutting concerns
-│   └── ServiceCollectionExtensions.cs  # DI registration, Polly policies
-├── Data/                      # Persistence layer
-│   ├── IUserRegistry.cs       # Interface for user-account storage
-│   ├── UserRegistry.cs        # Thread-safe JSON storage (users.json)
-│   ├── IGuildConfigRegistry.cs # Interface for guild configuration
-│   └── GuildConfigRegistry.cs  # Thread-safe JSON storage (guilds.json)
-├── Models/                    # Data transfer objects
-│   ├── RiotModels.cs          # Riot API models + GuildConfig
-│   ├── GeminiModels.cs        # Gemini API models
-│   └── HealthStatus.cs        # Health check + CacheStats models
-├── Services/                  # Core business logic
-│   ├── BotService.cs          # Main orchestrator
-│   ├── RiotService.cs         # Riot API client
-│   ├── GeminiService.cs       # Gemini AI client (multimodal)
-│   ├── PolitechnikaService.cs # WIiT PK web scraping + AI search
-│   ├── RiotImageCacheService.cs  # Asset caching with cleanup
-│   └── LoggingService.cs      # Serilog configuration
-└── Strategy/                  # Strategy pattern implementations
-    ├── Notification/
-    │   ├── IMatchNotification.cs  # Interface
-    │   ├── PollingStrategy.cs     # Background polling
-    │   └── CommandStrategy.cs     # On-demand checking
-    └── Rendering/
-        ├── IGameSummaryRenderer.cs  # Interface
-        └── ImageSharpRenderer.cs    # Image generation
-```
+OpenClaw exposes a simple REST API:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/tasks` | POST | Submit a task |
+| `/tasks/{id}` | GET | Poll status and file metadata |
+| `/tasks/{id}/files` | GET | Download output files as base64 JSON |
+| `/tasks/{id}` | DELETE | Cancel a running task |
+| `/health` | GET | Health check |
+
+The agent uses Claude Sonnet via the Anthropic API with native `tool_use`. Available tools: `write_file`, `run_bash`, `read_file`, `list_dir`, `mark_output`, and `web_search` (enabled conditionally based on prompt keywords).
+
+Files are returned as base64-encoded JSON through `GET /tasks/{id}/files`. The bot decodes them into `MemoryStream` and uploads directly to Discord. No Docker volume is shared between containers.
+
+Pre-installed Python libraries include: matplotlib, numpy, pandas, seaborn, plotly, scipy, scikit-learn, openpyxl, pypdf, python-docx, reportlab, pillow, requests, httpx, beautifulsoup4, and more.
+
+The agent environment also includes .NET 9.0 SDK and Node.js 20 LTS.
 
 ---
 
-## Key Technical Features
+## Technical deep-dive
 
-### 0. Dynamic Guild Management
+### Dependency injection and service lifetime
 
-The bot automatically manages guilds without requiring manual configuration:
+All services are registered in `ServiceCollectionExtensions.cs` using `Microsoft.Extensions.DependencyInjection`. Every service uses singleton lifetime — the bot is a long-running process and creating new instances per request would be wasteful and incorrect for stateful components like `UserRegistry`.
 
-#### Auto-Discovery
-- No need to configure SERVER_IDS in .env
-- Bot automatically registers slash commands when:
-  - Starting up (for all connected guilds via _client.Guilds)
-  - Joining a new guild (via JoinedGuild event)
-- Bot cleans up guild configuration when leaving (via LeftGuild event)
-
-#### Multi-Server Registration
-- One user can register the same Riot account on multiple servers
-- RiotAccount stores a list of RegisteredGuildIds (not just one)
-- When a match finishes:
-  - Image is rendered ONCE
-  - Notification sent to ALL servers where user is registered
-- Unregistering on one server does not affect other servers
-- Account is fully deleted only when no servers remain
-
-#### Dynamic Channel Configuration
-- Administrators use /laskbot setup-channel to set notification channel
-- Channel ID stored in guilds.json (via GuildConfigRegistry)
-- No hardcoded channel names
-- If channel is deleted, bot notifies admins and cleans up config
-
-#### Slash Commands
-| Command | Description |
-|---------|-------------|
-| /laskbot register nick:X tag:Y | Register LoL account on this server |
-| /laskbot unregister | Remove account from this server |
-| /laskbot setup-channel channel:X | Set notification channel (Admin only) |
-| /laskbot status | Show bot uptime, stats, cache info |
-| /laskbot ask query:X [attachment:file] | Ask Gemini AI with optional single attachment |
-| /laskbot check-latest-match | Display your latest match result |
-| /laskbot pk query:X | Search Politechnika Krakowska WIiT resources |
-| /laskbot pk-watch-start | Start watching for schedule updates on this channel |
-| /laskbot pk-watch-stop | Stop watching for schedule updates on this channel |
-| /laskbot info | Show bot information |
-| !ask [question] + attachments | Text command for multiple attachments |
-
-#### Politechnika Krakowska WIiT Integration
-The bot can search the Politechnika Krakowska WIiT website for documents, schedules, and resources:
-- **Command:** `/laskbot pk query:"plan zajęć informatyka I stopień"`
-- **Features:**
-  - Web scraping of it.pk.edu.pl with caching (1 hour)
-  - Gemini AI for intelligent link matching
-  - Priority for newest documents (by date in filename)
-  - Direct file links (.pdf, .xlsx, .docx)
-  - Degree level filtering (I stopień vs II stopień)
-
-#### Schedule Watcher
-Automatic monitoring for new/updated schedules:
-- **Start:** `/laskbot pk-watch-start` - subscribe current channel to updates
-- **Stop:** `/laskbot pk-watch-stop` - unsubscribe current channel
-- **Features:**
-  - Checks every 30 minutes for changes
-  - Detects new documents and date changes in existing ones
-  - Per-channel subscriptions (notifications go only to subscribed channels)
-  - Persistent state (survives bot restart via pk_state.json)
-  - Patterns: Informatyka I/II stopień, Teleinformatyka I stopień
-
-#### AI Attachments Support
-The bot supports asking Gemini AI questions with attached files:
-- **Slash command** `/laskbot ask` - supports one optional attachment
-- **Text command** `!ask` - supports unlimited attachments (images, documents)
-
-Supported file types:
-- Images: PNG, JPEG, GIF, WebP
-- Documents: PDF, TXT, CSV, HTML, Markdown, JSON
-- Office: DOCX, XLSX, PPTX
-- Max file size: 20MB per file
-
-#### Data Separation (SRP)
-- UserRegistry: manages user-to-Riot-account mappings (users.json)
-- GuildConfigRegistry: manages per-server settings (guilds.json)
-- Both use ReaderWriterLockSlim for thread safety
-
-### 1. Dependency Injection (Microsoft.Extensions.DependencyInjection)
-
-All services are registered in ServiceCollectionExtensions.cs:
-- Singleton lifetime for stateful services
-- IHttpClientFactory for managed HTTP connections
-- Interface-based registration for testability
+Services that need HTTP access are registered with `IHttpClientFactory` rather than instantiating `HttpClient` directly. This prevents socket exhaustion caused by `HttpClient` disposal and ensures DNS changes are picked up through connection pool recycling.
 
 ```
 Program.cs
   └── ServiceCollection.AddApplicationServices()
-        ├── AppSettings (singleton)
-        ├── IUserRegistry -> UserRegistry
-        ├── IGuildConfigRegistry -> GuildConfigRegistry
-        ├── RiotImageCacheService
-        ├── IGameSummaryRenderer -> ImageSharpRenderer
-        ├── RiotService (uses IHttpClientFactory)
-        └── GeminiService (uses IHttpClientFactory)
+        ├── AppSettings (singleton, immutable)
+        ├── IUserRegistry -> UserRegistry (ReaderWriterLockSlim)
+        ├── IGuildConfigRegistry -> GuildConfigRegistry (ReaderWriterLockSlim)
+        ├── IGameSummaryRenderer -> ImageSharpRenderer (SemaphoreSlim)
+        ├── ITftSummaryRenderer -> TftImageSharpRenderer (SemaphoreSlim)
+        ├── RiotService (IHttpClientFactory + SemaphoreSlim)
+        ├── GeminiService (IHttpClientFactory + SemaphoreSlim)
+        ├── IAgentClient -> OpenClawAgentClient (IHttpClientFactory)
+        ├── IAgentOrchestrator -> AgentOrchestrator (Channel<T>)
+        └── IAgentService -> AgentService (facade)
 ```
 
-### 2. IHttpClientFactory with Named Clients
-
-HTTP clients are managed by the factory, preventing socket exhaustion:
-- RiotApi - pre-configured with X-Riot-Token header
-- GeminiApi - pre-configured with 30s timeout
-
-Benefits:
-- Automatic connection pooling
-- DNS refresh handling
-- Centralized configuration
-
-### 3. Polly Retry Policies
-
-Configured in ServiceCollectionExtensions.GetRetryPolicy():
-- Handles transient HTTP errors (5xx, network failures)
-- Handles 429 Too Many Requests
-- Exponential backoff: 2s, 4s, 8s
-- Respects Retry-After header from API responses
-- Structured logging on each retry attempt
-
-### 4. Rate Limiting (SemaphoreSlim)
-
-Multiple layers of rate limiting:
-
-| Component | Mechanism | Purpose |
-|-----------|-----------|---------|
-| RiotService | SemaphoreSlim(1,1) | Max 1 concurrent request, 1.2s between requests |
-| GeminiService | SemaphoreSlim(1,1) | Max 1 concurrent request, 1s between requests |
-| PollingStrategy | SemaphoreSlim(3,3) | Max 3 users checked concurrently |
-| ImageSharpRenderer | SemaphoreSlim(2,2) | Max 2 concurrent renders |
-| RiotImageCacheService | Per-file SemaphoreSlim | Prevent duplicate downloads |
-
-### 5. Thread-Safe Registries (ReaderWriterLockSlim)
-
-UserRegistry.cs and GuildConfigRegistry.cs use ReaderWriterLockSlim for optimal concurrency:
-- Multiple concurrent readers allowed
-- Exclusive access for writes
-- Atomic file operations (write to .tmp, then move)
-
-```
-Read operations:  _lock.EnterReadLock()  -> Multiple allowed
-Write operations: _lock.EnterWriteLock() -> Exclusive access
-```
-
-### 6. Graceful Shutdown and Disposal Strategy
-
-BotService implements IAsyncDisposable:
-- SIGTERM/SIGINT handlers registered
-- CancellationToken propagated to all async operations
-- All strategies stopped before Discord client logout
-
-Disposal strategy (what needs manual Dispose):
-```
-Manual dispose required:
-├── _shutdownCts (CancellationTokenSource) - not in DI
-└── _client (DiscordSocketClient) - not in DI, needs controlled order
-
-Automatic dispose (by ServiceProvider):
-├── RiotService         -> SemaphoreSlim
-├── GeminiService       -> SemaphoreSlim  
-├── RiotImageCacheService -> HttpClient, SemaphoreSlim locks
-├── ImageSharpRenderer  -> SemaphoreSlim
-├── UserRegistry        -> ReaderWriterLockSlim
-└── GuildConfigRegistry -> ReaderWriterLockSlim
-```
-
-### 7. Structured Logging (Serilog)
-
-- Console sink with colored output
-- File sink with daily rotation
-- Structured properties for filtering
-- Different log levels per component
-
-### 8. Health Status and Monitoring
-
-- BotService.GetHealthStatus() returns current state
-- /laskbot status command shows:
-  - Uptime
-  - Tracked players count
-  - Connected servers count
-  - Cache statistics (file count, size in MB)
-  - Rate limit status for APIs
-
-### 9. Automatic Cache Cleanup
-
-RiotImageCacheService manages Data Dragon assets:
-- Champion and item icons cached locally
-- Periodic cleanup runs every 7 days (via BotService)
-- Files not accessed for 30 days are deleted
-- Prevents disk bloat on long-running instances
+Interfaces are used for `IAgentClient`, `IAgentOrchestrator`, `IAgentService`, `IUserRegistry`, `IGuildConfigRegistry`, `IGameSummaryRenderer`, and `ITftSummaryRenderer`, making each component independently testable and swappable.
 
 ---
 
-## Cancellation Token Flow
+### Polly retry policies with Retry-After support
 
-### Token Sources (creators)
+All three HTTP clients (Riot API, Gemini, OpenClaw) share a Polly policy configured in `ServiceCollectionExtensions.GetRetryPolicy()`:
 
-| Component | Token Source | Scope |
-|-----------|--------------|-------|
-| BotService | _shutdownCts | Application lifetime |
-| PollingStrategy | _cts | Polling loop lifetime |
-| ImageSharpRenderer | CancellationTokenSource(30s) + LinkedTokenSource | Per-render timeout |
+```csharp
+HttpPolicyExtensions
+    .HandleTransientHttpError()           // 5xx, network failures
+    .OrResult(msg => msg.StatusCode == HttpStatusCode.TooManyRequests)
+    .WaitAndRetryAsync(
+        retryCount: 3,
+        sleepDurationProvider: (attempt, response, _) =>
+        {
+            // Respect Retry-After header if present (e.g. from Riot API)
+            if (response.Result?.StatusCode == HttpStatusCode.TooManyRequests &&
+                response.Result.Headers.RetryAfter?.Delta is { } retryAfter)
+                return retryAfter;
+            // Otherwise exponential backoff: 2s, 4s, 8s
+            return TimeSpan.FromSeconds(Math.Pow(2, attempt));
+        });
+```
 
-### Token Flow Diagram
+The policy handles 429 responses intelligently: if the API returns a `Retry-After` header, the delay uses that value exactly. Without it, exponential backoff kicks in. Every retry attempt is logged with structured properties for filtering.
+
+---
+
+### Multi-layer rate limiting
+
+The application has four separate rate limiting mechanisms, each scoped to a different concern:
+
+| Layer | Mechanism | Parameters | Purpose |
+|---|---|---|---|
+| `RiotService` | `SemaphoreSlim(1,1)` + timer | 1 concurrent, 1200ms min interval | Respect Riot personal API key limits |
+| `GeminiService` | `SemaphoreSlim(1,1)` + timer | 1 concurrent, 1000ms min interval | Avoid Gemini burst rejections |
+| `PollingStrategy` | `SemaphoreSlim(3,3)` | 3 concurrent users, 367ms stagger | Parallelise checks without hammering Riot |
+| `ImageSharpRenderer` | `SemaphoreSlim(2,2)` + 30s timeout | 2 concurrent renders | Cap memory usage during image generation |
+
+`RiotService` also maintains a backoff timestamp. When a 429 is received, it stores `DateTime.UtcNow + RetryAfter` and skips all requests until that time passes — even between polling cycles.
+
+---
+
+### CancellationToken propagation
+
+A single `CancellationTokenSource` (`_shutdownCts`) is created in `BotService` at startup. Its token flows through every async operation in the application:
 
 ```
 BotService._shutdownCts.Token
-│
-├── HandleAskCommandAsync()
-│   └── GeminiService.GetAnswerAsync(token)
-│       └── HttpClient.PostAsync(token)
-│
-├── RegisterRiotAccountAsync()
-│   └── RiotService.GetAccountAsync(token)
-│   └── RiotService.GetLatestMatchIdAsync(token)
-│       └── HttpClient.GetAsync(token)
-│
-├── NotifyMatchFinishedAsync()
-│   └── ImageSharpRenderer.RenderSummaryAsync(token)
-│       └── LinkedTokenSource(external + 30s timeout)
-│           └── RiotImageCacheService.GetChampionIconAsync(token)
-│           └── RiotImageCacheService.GetItemIconAsync(token)
-│               └── HttpClient.GetByteArrayAsync(token)
-│
-└── PollingStrategy (has own _cts)
-    └── CheckMatchesInternalAsync(_cts.Token)
-        └── ProcessSingleUserMatchAsync(token)
-            └── RiotService.GetLatestMatchIdAsync(token)
-            └── RiotService.GetMatchDetailsAsync(token)
-            └── _onNewMatchFound(account, matchData, token)
-                └── NotifyMatchFinishedAsync(token)
+├── all slash command handlers
+│   └── RiotService / GeminiService / AgentService calls
+│       └── HttpClient.GetAsync(token) / PostAsync(token)
+├── PollingStrategy (has own _cts linked via Task.Run)
+│   └── PeriodicTimer.WaitForNextTickAsync(token)
+│   └── ProcessSingleUserMatchAsync(token)
+│       └── RiotService.GetLatestMatchIdAsync(token)
+│       └── NotifyMatchFinishedAsync(token)
+│           └── ImageSharpRenderer.RenderSummaryAsync(token)
+│               └── LinkedTokenSource(external + 30s internal)
+│                   └── RiotImageCacheService downloads(token)
+└── AgentOrchestrator
+    └── PollForCompletionAsync(token)
+        └── Task.Delay(PollInterval, token)
 ```
 
-### LinkedTokenSource Pattern
+On SIGTERM or SIGINT, `_shutdownCts.Cancel()` fires. All in-flight `HttpClient` requests, `Task.Delay` calls, and `SemaphoreSlim.WaitAsync` calls unwind via `OperationCanceledException`. `BotService.ShutdownAsync()` then stops all strategies in parallel with `Task.WhenAll`, disconnects the Discord client, and disposes the service container.
 
-ImageSharpRenderer combines external cancellation with internal timeout:
+`ImageSharpRenderer` uses a linked token combining the external cancellation with a 30-second internal timeout. The render fails fast if either fires, preventing hung renders from blocking the semaphore slot.
+
+---
+
+### Thread-safe storage with ReaderWriterLockSlim
+
+`UserRegistry` and `GuildConfigRegistry` store data in `Dictionary<ulong, T>` backed by JSON files. They use `ReaderWriterLockSlim` to allow multiple concurrent reads while serialising writes:
 
 ```csharp
-using var timeoutCts = new CancellationTokenSource(30s);
-using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-    cancellationToken,  // external (shutdown)
-    timeoutCts.Token    // internal (timeout)
-);
-// Operation cancelled if EITHER token fires
+// Multiple readers: polling, command handlers, and status queries run concurrently
+_lock.EnterReadLock();
+try { return _userMap.TryGetValue(id, out var account) ? account : null; }
+finally { _lock.ExitReadLock(); }
+
+// Exclusive write: registration, match ID update, unregister
+_lock.EnterWriteLock();
+try
+{
+    _userMap[discordId] = account;
+    SaveInternal(); // atomic: write to .tmp, then File.Move
+}
+finally { _lock.ExitWriteLock(); }
+```
+
+File writes are atomic: data is serialised to a `.tmp` file first, then moved to the target path with `File.Move(..., overwrite: true)`. This means a crash mid-write never corrupts the existing file.
+
+---
+
+### Match polling with PeriodicTimer and bounded parallelism
+
+`PollingStrategy` runs a background loop using `PeriodicTimer` (introduced in .NET 6), which fires every 7 minutes. Unlike `Timer`, `PeriodicTimer` is async-aware and respects `CancellationToken` directly in `WaitForNextTickAsync`.
+
+For each tick, it checks all registered users with bounded parallelism:
+
+```csharp
+using var semaphore = new SemaphoreSlim(MaxConcurrentChecks); // 3
+var tasks = new List<Task>();
+
+foreach (var (userId, account) in users)
+{
+    tasks.Add(ProcessUserWithSemaphoreAsync(semaphore, userId, account, token));
+    // Stagger task starts: 367ms between each (1100ms / 3)
+    await Task.Delay(DelayBetweenUsers / MaxConcurrentChecks, token);
+}
+
+await Task.WhenAll(tasks);
+```
+
+The stagger between task starts prevents three simultaneous Riot API calls from firing at exactly the same millisecond. Each task then waits on the semaphore before making its API call, so at most 3 users are being checked at any given moment regardless of how many are registered.
+
+Before every polling cycle, the strategy checks `RiotService.IsRateLimited`. If the service is in a backoff period, the entire cycle is skipped rather than accumulating queued requests.
+
+---
+
+### Strategy pattern for notifications
+
+`IMatchNotification` defines two methods: `StartMonitoringAsync` and `StopMonitoringAsync`. Two implementations exist:
+
+- `PollingStrategy` — runs the background loop described above. Automatically detects new matches.
+- `CommandStrategy` — stateless, used for on-demand `/laskbot check-latest-match`. `StartMonitoringAsync` is a no-op.
+
+Both are stored in a `List<IMatchNotification>` in `BotService`. Adding a new notification strategy (e.g. webhook-based) requires only implementing the interface and adding it to the list — no changes to `BotService` logic.
+
+---
+
+### Image rendering with ImageSharp
+
+Match summary images are generated in-process using `SixLabors.ImageSharp`. The renderer builds a scoreboard-style image with two team blocks, sorted by role (TOP → JGL → MID → BOT → SUP):
+
+- Header: VICTORY/DEFEAT, game mode, duration
+- Per-player row: champion icon (32px), level badge, name, 6 item slots + trinket + quest item, KDA, CS, gold (formatted as 12.3k), damage dealt
+- Tracked player row highlighted with a different background colour
+- Champion and item icons loaded from a local file cache
+
+Asset loading for all 10 players runs in parallel with `Task.WhenAll`. Icons are cached in `ConcurrentDictionary<string, string>` (path lookup). On first access, a `SemaphoreSlim(1,1)` per file path prevents duplicate downloads when two matches finish simultaneously for players sharing a champion.
+
+The render itself is protected by `SemaphoreSlim(2,2)` with a 30-second timeout. If both slots are occupied, new renders wait up to 30 seconds before throwing `TimeoutException`. After rendering, the image is written to a `MemoryStream` as PNG and returned — no temp files on disk.
+
+---
+
+### Agent task orchestration with Channel
+
+Agent tasks are queued in a `System.Threading.Channels.Channel<AgentTask>` with a bounded capacity of 20. `Channel<T>` provides structured producer-consumer flow with built-in backpressure: if the queue is full, the writer awaits rather than dropping or throwing.
+
+```
+BotService (producer)
+  └── AgentOrchestrator.EnqueueTaskAsync(task)
+        └── Channel.Writer.WriteAsync(task)  // blocks if full
+
+AgentOrchestrator (consumer, single background loop)
+  └── await foreach (var task in Channel.Reader.ReadAllAsync(token))
+        └── ProcessSingleTaskAsync(task, token)
+              ├── OpenClawAgentClient.SubmitTaskAsync()
+              ├── PollForCompletionAsync() — polls every 10s
+              └── OpenClawAgentClient.GetTaskFilesAsync() — on completion
+```
+
+Tasks are processed one at a time by the orchestrator loop. Each task has its own `CancellationTokenSource` with the configured timeout (default 10 minutes), linked to the application shutdown token. If the timeout fires, the orchestrator sends a cancel request to OpenClaw and delivers a timeout result to Discord.
+
+---
+
+### File transfer without shared volumes
+
+Agent output files are transferred entirely over HTTP as base64-encoded JSON. When a task completes:
+
+1. `AgentOrchestrator` calls `GET /tasks/{id}/files` on OpenClaw
+2. OpenClaw reads each output file from disk and encodes it as base64
+3. The C# client deserialises into `AgentFilesResponse` containing `List<AgentOutputFile>`
+4. Each `AgentOutputFile` has a `GetBytes()` method: `Convert.FromBase64String(ContentBase64)`
+5. `BotService` creates a `MemoryStream` from the bytes and passes it as `FileAttachment` to `channel.SendFilesAsync`
+
+Files over 10 MB are marked `TooLarge: true` and returned without content. Files over 25 MB are noted in the Discord message with a warning. This avoids loading multi-megabyte files into memory on the bot side when they cannot be sent anyway.
+
+No Docker volume is mounted between `discord-bot` and `openclaw`. The containers share only a named internal network.
+
+---
+
+### OpenClaw: native tool use loop
+
+The agent does not parse markdown code blocks. Claude receives structured tools through the Anthropic API and calls them directly. The tool loop in `anthropic_client.py`:
+
+```python
+while tool_rounds < MAX_TOOL_ROUNDS:
+    response = client.messages.create(
+        model=model, max_tokens=4096,
+        system=SYSTEM_PROMPT, messages=working_messages, tools=tools
+    )
+    if response.stop_reason == "end_turn":
+        return extract_text(response), marked_outputs
+    if response.stop_reason == "tool_use":
+        # execute each tool call, append results as user turn
+        tool_results = [execute_tool(block, workspace, marked_outputs)
+                        for block in response.content if block.type == "tool_use"]
+        working_messages.append({"role": "user", "content": tool_results})
+```
+
+Available tools: `write_file`, `run_bash`, `read_file`, `list_dir`, `mark_output`. Web search (`web_search_20250305`) is added to the tool list only when the prompt contains keywords like "znajdź", "aktualne", "news", "price" — checked by regex in `engine.py` before the first API call.
+
+`mark_output` is the key tool for result delivery: the model calls it with a list of file paths when finished. Those paths are captured in `marked_outputs` and returned to `engine.py`, which uses them directly instead of scanning the workspace. If the model never calls `mark_output`, the engine falls back to `validate_output_files` and `select_output_files`.
+
+---
+
+### Graceful shutdown
+
+`BotService` registers handlers for both SIGINT (`Console.CancelKeyPress`) and SIGTERM (`AppDomain.CurrentDomain.ProcessExit`). Both cancel `_shutdownCts`.
+
+`ShutdownAsync` then runs:
+
+```csharp
+// Stop all strategies in parallel
+await Task.WhenAll(_notificationStrategies.Select(s => s.StopMonitoringAsync()));
+await _politechnikaWatcher.StopWatchingAsync();
+await _agentService.StopAsync();   // drains Channel, cancels in-flight tasks
+
+// Disconnect from Discord
+await _client.StopAsync();
+await _client.LogoutAsync();
+```
+
+`DisposeAsync` runs after: `_shutdownCts`, `DiscordSocketClient`, and the `ServiceProvider` are disposed in order. The service provider's disposal chain handles `SemaphoreSlim`, `ReaderWriterLockSlim`, and `HttpClient` instances registered as singletons.
+
+---
+
+## Dependencies
+
+**Bot (C#)**
+
+| Package | Purpose |
+|---|---|
+| Discord.Net 3.x | Discord WebSocket gateway and REST API |
+| Microsoft.Extensions.DependencyInjection | DI container |
+| Microsoft.Extensions.Http | IHttpClientFactory |
+| Microsoft.Extensions.Http.Polly | Polly integration for named clients |
+| Polly 8.x | Retry policies, exponential backoff |
+| Mscc.GenerativeAI | Google Gemini SDK (multimodal) |
+| SixLabors.ImageSharp | In-process image generation |
+| HtmlAgilityPack | HTML parsing for web scraping |
+| UglyToad.PdfPig | PDF text extraction |
+| Serilog | Structured logging with file and console sinks |
+
+**OpenClaw (Python)**
+
+| Package | Purpose |
+|---|---|
+| Flask + Gunicorn | HTTP API server |
+| anthropic | Claude API with tool use |
+| matplotlib, seaborn, plotly | Chart generation |
+| pandas, numpy, scipy, scikit-learn | Data analysis |
+| openpyxl, pypdf, python-docx, reportlab | Document handling |
+| requests, httpx, aiohttp | HTTP clients |
+| beautifulsoup4, lxml | HTML parsing |
+| pillow | Image processing |
+
+---
+
+## Project structure
+
+```
+Discord Bot AI/
+├── Configuration/         AppSettings (immutable), EnvironmentConfigProvider
+├── Data/                  UserRegistry, GuildConfigRegistry (ReaderWriterLockSlim + atomic JSON)
+├── Infrastructure/        ServiceCollectionExtensions (DI, IHttpClientFactory, Polly)
+├── Models/                DTOs for Riot, Gemini, and Agent APIs
+├── Services/
+│   ├── BotService.cs              Main orchestrator, lifecycle, Discord events
+│   ├── RiotService.cs             Riot API (rate limiting, backoff, match data)
+│   ├── GeminiService.cs           Gemini AI (multimodal, rate limiting)
+│   ├── PolitechnikaService.cs     WIiT scraper + Gemini link matching
+│   ├── RiotImageCacheService.cs   Champion/item icon cache (concurrent download)
+│   └── Agent/
+│       ├── AgentService.cs        Facade: PDF parsing, prompt sanitisation, submission
+│       ├── AgentOrchestrator.cs   Channel<T> queue, polling, timeout, result delivery
+│       ├── OpenClawAgentClient.cs HTTP client (submit, poll, fetch files, cancel)
+│       ├── IAgentClient.cs
+│       └── IAgentOrchestrator.cs
+└── Strategy/
+    ├── Notification/
+    │   ├── IMatchNotification.cs
+    │   ├── PollingStrategy.cs     PeriodicTimer, SemaphoreSlim(3,3), staggered starts
+    │   └── CommandStrategy.cs     On-demand, stateless
+    └── Rendering/
+        ├── IGameSummaryRenderer.cs
+        ├── ImageSharpRenderer.cs  LoL scoreboard, parallel asset loading
+        └── TftImageSharpRenderer.cs
+
+openclaw-agent/
+├── src/
+│   ├── app.py                Flask routes (/tasks, /tasks/{id}, /tasks/{id}/files)
+│   ├── core/
+│   │   ├── engine.py         Task lifecycle, workspace, web_search heuristic
+│   │   ├── anthropic_client.py  Tool loop, tool execution, mark_output capture
+│   │   └── prompts.py        System prompt with pre-installed lib list
+│   └── utils/
+│       ├── file_manager.py   Workspace lifecycle, FAILURE_INDICATORS, output selection
+│       └── shell_executor.py Subprocess wrapper with timeout
+└── Dockerfile               Multi-stage: python:3.12-slim + .NET 9.0 + Node.js 20
 ```
 
 ---
 
-## Application Flow Scenarios
+## Setup notes
 
-### Scenario 1: User Registers Account (First Server)
-
-```
-1. User executes /laskbot register nick:Player tag:EUNE on Server A
-2. BotService.OnSlashCommandAsync receives command
-3. BotService.RegisterRiotAccountAsync called
-4. command.DeferAsync() - Discord shows "thinking..."
-5. Check if user already has an account:
-   - UserRegistry.GetAccount(discordId) returns null
-6. RiotService.GetAccountAsync(nick, tag, token)
-   - SemaphoreSlim.WaitAsync(token) - acquire rate limit lock
-   - IHttpClientFactory.CreateClient("RiotApi")
-   - HttpClient.GetAsync(url, token)
-   - Polly policy handles retries if needed
-   - Deserialize response to RiotAccount
-   - SemaphoreSlim.Release() - release lock
-7. RiotService.GetLatestMatchIdAsync(puuid, token)
-8. UserRegistry.RegisterUser(discordId, account, guildId)
-   - Creates new account with RegisteredGuildIds = [Server A]
-   - ReaderWriterLockSlim.EnterWriteLock()
-   - SaveInternal() - atomic write to users.json
-   - ReaderWriterLockSlim.ExitWriteLock()
-9. command.FollowupAsync("Account registered...")
-```
-
-### Scenario 2: Same User Registers on Second Server
-
-```
-1. User executes /laskbot register nick:Player tag:EUNE on Server B
-2. BotService.RegisterRiotAccountAsync called
-3. UserRegistry.GetAccount(discordId) returns existing account
-4. Check if guildId already in RegisteredGuildIds:
-   - Server B not in list
-5. UserRegistry.RegisterUser(discordId, account, guildId)
-   - Adds Server B to existing account's RegisteredGuildIds
-   - NO API call to Riot (account already known)
-6. Account now has RegisteredGuildIds = [Server A, Server B]
-7. command.FollowupAsync("Your account is now also tracked on this server")
-```
-
-### Scenario 3: Match Notification (Multi-Server)
-
-```
-1. PollingStrategy detects new match for user
-2. NotifyMatchFinishedAsync(account, matchData, token) called
-3. account.RegisteredGuildIds = [Server A, Server B]
-4. Render image ONCE:
-   - ImageSharpRenderer.RenderSummaryAsync(account, matchData, token)
-   - Result copied to byte[] imageData
-5. For each guild in RegisteredGuildIds:
-   a. Server A:
-      - Get channelId from GuildConfigRegistry.GetNotificationChannel(guildA)
-      - Send image to channel
-   b. Server B:
-      - Get channelId from GuildConfigRegistry.GetNotificationChannel(guildB)
-      - Send same image to channel
-6. One render, multiple sends = efficient
-```
-
-### Scenario 4: User Unregisters from One Server
-
-```
-1. User executes /laskbot unregister on Server A
-2. User has RegisteredGuildIds = [Server A, Server B]
-3. BotService.UnregisterRiotAccountAsync called
-4. UserRegistry.RemoveUserFromGuild(discordId, guildA)
-   - Removes Server A from list
-   - RegisteredGuildIds = [Server B]
-   - Account still exists (list not empty)
-5. command.FollowupAsync("Unregistered from this server. Still tracked on 1 other server(s)")
-
-If user then unregisters from Server B:
-   - RegisteredGuildIds becomes empty
-   - Account fully deleted from users.json
-   - command.FollowupAsync("Account completely unregistered")
-```
-
-### Scenario 5: Polling Detects New Match (Full Flow)
-
-```
-1. PollingStrategy.StartMonitoringAsync running in background
-2. PeriodicTimer fires every 10 minutes
-3. CheckMatchesInternalAsync(token) called
-4. Check if RiotService.IsRateLimited - skip if true
-5. UserRegistry.GetAllTrackedUsers() - snapshot with read lock
-6. For each user (max 3 concurrent via SemaphoreSlim):
-   a. Wait 500ms between task starts (1500ms / 3)
-   b. ProcessUserWithSemaphoreAsync:
-      - SemaphoreSlim.WaitAsync(token)
-      - RiotService.GetLatestMatchIdAsync(puuid, token)
-      - Compare with stored LastMatchId
-      - If different: RiotService.GetMatchDetailsAsync(matchId, token)
-      - UserRegistry.UpdateLastMatchId(userId, matchId)
-      - Invoke _onNewMatchFound callback
-      - SemaphoreSlim.Release()
-7. NotifyMatchFinishedAsync(account, matchData, token)
-8. ImageSharpRenderer.RenderSummaryAsync(account, matchData, token)
-   - Create LinkedTokenSource (external + 30s timeout)
-   - SemaphoreSlim.WaitAsync(timeout) - max 2 concurrent renders
-   - RiotImageCacheService.GetChampionIconAsync(name, token)
-     - Check ConcurrentDictionary cache
-     - If not cached: acquire per-file lock, download, save
-   - Same for items
-   - Generate image with ImageSharp
-   - SaveAsPngAsync(stream, token)
-   - SemaphoreSlim.Release()
-9. Discord channel.SendFileAsync(imageStream, ...)
-```
-
-### Scenario 6: User Asks AI Question
-
-```
-1. User executes /laskbot ask query:"What is this?" attachment:[screenshot.png]
-   OR user sends: !ask What are these items? [attached: item1.png, item2.png]
-2. BotService.HandleAskCommandAsync or OnMessageReceivedAsync called
-3. command.DeferAsync() or EnterTypingState() - Discord shows "thinking..."
-4. AddAttachmentToRequest() validates each attachment:
-   - Check MIME type against GeminiSupportedTypes
-   - Check file size (max 20MB)
-   - Add valid attachments to GeminiRequest.Attachments list
-5. GeminiService.GetAnswerAsync(request, token)
-   - SemaphoreSlim.WaitAsync(token) - rate limiting
-   - Check minimum interval (1s)
-   - If no attachments: GenerateContent(prompt, token)
-   - If attachments present:
-     - Download each file via HttpClient.GetByteArrayAsync(url, token)
-     - Convert to base64, create InlineData parts
-     - Build multimodal content: [TextData] + [InlineData...]
-     - GenerateContent(parts, token)
-   - Extract text from GenerateContentResponse
-   - SemaphoreSlim.Release()
-6. BuildAskResponse() formats answer with attachment info
-7. command.FollowupAsync() or channel.SendMessageAsync() with MessageReference
-```
-
-### Scenario 7: Politechnika WIiT Resource Search
-
-```
-1. User executes /laskbot pk query:"plan zajęć informatyka I stopień"
-2. BotService.HandlePolitechnikaQueryAsync called
-3. command.DeferAsync() - Discord shows "thinking..."
-4. PolitechnikaService.ProcessQueryAsync(query, token)
-   - Check cache (1 hour expiration)
-   - If cache expired or empty:
-     a. SemaphoreSlim.WaitAsync(token) - scrape lock
-     b. Scrape multiple pages from it.pk.edu.pl:
-        - /studenci/
-        - /studenci/studia-i-stopnia/
-        - /studenci/plany-zajec/
-        - etc.
-     c. Parse HTML with HtmlAgilityPack
-     d. Extract links (text + URL pairs)
-     e. Filter relevant links (documents, pk.edu.pl domain)
-     f. Cache results
-     g. SemaphoreSlim.Release()
-5. Build Gemini prompt with scraped links
-   - Include user query
-   - Include all link text + URL pairs
-   - Instructions for intelligent matching (newest date, correct degree level)
-6. GeminiService.GetAnswerAsync(prompt, token)
-   - Rate limiting as usual
-   - Gemini returns single best-matching URL or "NOT_FOUND"
-7. ParseGeminiResponse()
-   - Extract URL from response
-   - Determine if file (.pdf, .xlsx, etc.)
-   - Build PolitechnikaResponse with link, file type, source
-8. Format and send response to user with link
-```
-
-### Scenario 8: Graceful Shutdown (Docker stop)
-
-```
-1. Docker sends SIGTERM to container
-2. AppDomain.CurrentDomain.ProcessExit event fires
-3. BotService._shutdownCts.Cancel() called
-4. All operations with CancellationToken throw OperationCanceledException:
-   - Active HTTP requests cancelled
-   - Task.Delay interrupted
-   - SemaphoreSlim.WaitAsync interrupted
-5. Main RunAsync catches OperationCanceledException
-6. ShutdownAsync() called:
-   - PollingStrategy.StopMonitoringAsync() - cancels polling loop
-   - CommandStrategy.StopMonitoringAsync() - no-op
-   - DiscordClient.StopAsync()
-   - DiscordClient.LogoutAsync()
-7. DisposeAsync() called:
-   - All services disposed
-   - DI container disposed
-8. LoggingService.Shutdown() - flush logs
-9. Process exits with code 0
-```
-
----
-
-## Component Responsibilities
-
-| Component | Responsibility |
-|-----------|---------------|
-| Program.cs | Entry point, DI setup, logging init |
-| AppSettings | Strongly-typed config from environment |
-| EnvironmentConfigProvider | Reads environment variables |
-| ServiceCollectionExtensions | DI registration, HTTP client config, Polly policies |
-| BotService | Main orchestrator, Discord event handling, lifecycle |
-| RiotService | Riot API communication, rate limiting |
-| GeminiService | Gemini AI communication, rate limiting, multimodal support |
-| PolitechnikaService | Web scraping it.pk.edu.pl, Gemini-powered link matching |
-| RiotImageCacheService | Download and cache game assets |
-| UserRegistry | Persist user-account mappings, thread-safe |
-| GuildConfigRegistry | Persist per-server settings, thread-safe |
-| LoggingService | Serilog configuration |
-| PollingStrategy | Background match detection loop |
-| CommandStrategy | On-demand match checking (also with CancellationToken) |
-| ImageSharpRenderer | Generate match summary images |
-
----
-
-## Security
-
-### Docker Security
-
-- Container runs as non-root user (uid 1000)
-- Read-only root filesystem
-- Tmpfs for temporary files
-- Resource limits (memory, CPU)
-- No privileged mode
-
-### API Key Protection
-
-- Keys passed via environment variables
-- Never logged (Serilog configured to exclude)
-- .env file excluded from version control (.gitignore)
-- Docker secrets support possible
-
-### Network Security
-
-- HTTPS for all external API calls
-- No exposed ports (bot connects outbound only)
-- Discord WebSocket secured by library
-
-### File System Security
-
-- Atomic file writes (temp file + move)
-- Per-file locks prevent race conditions
-- Volume permissions set correctly
-
----
-
-## Data Persistence
-
-Docker volumes used for persistent data:
-
-| Volume | Mount Point | Purpose |
-|--------|-------------|---------|
-| discord-bot-data | /app/data | User registrations (users.json) |
-| discord-bot-cache | /app/cache | Downloaded champion/item icons |
-| discord-bot-logs | /app/logs | Application log files |
-
-Data survives container restarts and updates.
-
----
-
-## Development
-
-### Run locally (without Docker)
-
-```bash
-# Set required environment variables
-export DISCORD_TOKEN=your_token
-export GEMINI_API_KEY=your_key
-export RIOT_TOKEN=your_key
-export SERVER_IDS=123456789
-
-# Run
-cd "Discord Bot AI"
-dotnet run
-```
-
-### Build Docker image manually
-
-```bash
-docker build -t discord-bot-ai .
-```
-
-### Project Dependencies
-
-- Discord.Net 3.19.0 - Discord API client
-- Microsoft.Extensions.DependencyInjection - DI container
-- Microsoft.Extensions.Http - IHttpClientFactory
-- Microsoft.Extensions.Http.Polly - Polly integration
-- Polly 8.5.1 - Resilience policies
-- Mscc.GenerativeAI 3.0.2 - Google Gemini SDK (multimodal support)
-- HtmlAgilityPack - HTML parsing for web scraping
-- Serilog - Structured logging
-- SixLabors.ImageSharp - Image generation
-- Newtonsoft.Json - JSON serialization
-
----
-
-## Current Application State Summary
-
-The application is a production-ready Discord bot with:
-
-1. Full Docker support with graceful shutdown handling
-2. Dependency Injection for loose coupling and testability
-3. IHttpClientFactory for proper HTTP lifecycle management
-4. Polly retry policies with exponential backoff
-5. Multi-layer rate limiting to respect API limits
-6. Thread-safe data storage with ReaderWriterLockSlim
-7. CancellationToken propagation through entire call stack
-8. Structured logging with Serilog
-9. Strategy pattern for notification mechanisms
-10. Image rendering with concurrency control
-11. Asset caching with concurrent-safe downloads
-
-Have fun testing! To get everything running smoothly, remember these final steps:
-* Discord Developer Portal: Create a new application and a bot account at the Discord Developer Portal.
-* Enable Message Intent: In the Bot tab, you MUST enable the Message Content Intent—the bot requires this to recognize and process your slash commands.
-* Invite to Server: Use the OAuth2 URL generator to invite the bot to your server. Ensure it has permissions to Send Messages, Attach Files, and Use Slash Commands.
-* The "bot" Channel: Create a text channel named exactly "bot" on your server. The bot specifically looks for this name to post match notifications.
-* Provide correct .env for docker or params if started locally.
-
-Enjoy the climb! :D
+- In the Discord Developer Portal, enable **Message Content Intent** under the Bot tab.
+- Invite the bot with permissions: Send Messages, Attach Files, Use Slash Commands.
+- Use `/laskbot setup-channel` in your server to configure where match notifications are posted.
+- The bot registers slash commands automatically on startup and when joining new servers.
+- No manual `SERVER_IDS` configuration needed — guild management is fully automatic.
