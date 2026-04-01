@@ -13,7 +13,6 @@ namespace Discord_Bot_AI.Services;
 
 /// <summary>
 /// Main orchestrator service for the Discord bot, managing all subsystems and their lifecycle.
-/// Implements IAsyncDisposable for graceful shutdown support (Docker-friendly).
 /// </summary>
 public class BotService : IAsyncDisposable
 {
@@ -217,10 +216,7 @@ public class BotService : IAsyncDisposable
 
         Log.Information("TFT match ID sync completed: {Synced}/{Total}", synced, users.Count);
     }
-
-    /// <summary>
-    /// Returns the current health status of the bot for monitoring purposes.
-    /// </summary>
+    
     public HealthStatus GetHealthStatus()
     {
         return new HealthStatus
@@ -546,7 +542,7 @@ public class BotService : IAsyncDisposable
 
     /// <summary>
     /// Handles the ask command, supporting text prompts with optional image/document attachments.
-    /// For multiple attachments, use text command: !ask [question] with attached files.
+    /// For multiple attachments, text command: !ask [question] with attached files.
     /// </summary>
     private async Task HandleAskCommandAsync(SocketSlashCommand command, SocketSlashCommandDataOption subCommand)
     {
@@ -651,8 +647,6 @@ public class BotService : IAsyncDisposable
     
     /// <summary>
     /// Handles text-based messages starting with !ask prefix.
-    /// Supports multiple attachments (images, documents, screenshots).
-    /// Usage: !ask [your question] + attach files to the message.
     /// </summary>
     private Task OnMessageReceivedAsync(SocketMessage message)
     {
@@ -1536,10 +1530,7 @@ public class BotService : IAsyncDisposable
                 options: new RequestOptions { CancelToken = ct });
         }
     }
-
-    /// <summary>
-    /// Releases all resources used by the bot service.
-    /// </summary>
+    
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;

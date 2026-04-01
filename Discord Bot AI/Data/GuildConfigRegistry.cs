@@ -1,4 +1,4 @@
-﻿﻿using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Discord_Bot_AI.Models;
 using Serilog;
 
@@ -6,7 +6,6 @@ namespace Discord_Bot_AI.Data;
 
 /// <summary>
 /// Thread-safe registry for managing Discord guild configurations.
-/// Uses ReaderWriterLockSlim for efficient concurrent read access with exclusive write access.
 /// </summary>
 public class GuildConfigRegistry : IGuildConfigRegistry
 {
@@ -30,8 +29,6 @@ public class GuildConfigRegistry : IGuildConfigRegistry
     /// <summary>
     /// Sets or updates the notification channel for a guild.
     /// </summary>
-    /// <param name="guildId">The Discord guild ID.</param>
-    /// <param name="channelId">The text channel ID for notifications.</param>
     public void SetNotificationChannel(ulong guildId, ulong channelId)
     {
         _lock.EnterWriteLock();
@@ -55,8 +52,6 @@ public class GuildConfigRegistry : IGuildConfigRegistry
     /// <summary>
     /// Gets the configured notification channel for a guild.
     /// </summary>
-    /// <param name="guildId">The Discord guild ID.</param>
-    /// <returns>The channel ID or null if not configured.</returns>
     public ulong? GetNotificationChannel(ulong guildId)
     {
         _lock.EnterReadLock();
@@ -154,10 +149,7 @@ public class GuildConfigRegistry : IGuildConfigRegistry
             Log.Information("Loaded {Count} guild configurations", _guildConfigs.Count);
         }
     }
-
-    /// <summary>
-    /// Releases resources used by the registry.
-    /// </summary>
+    
     public void Dispose()
     {
         if (_disposed) return;

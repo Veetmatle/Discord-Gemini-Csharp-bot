@@ -1,4 +1,4 @@
-﻿﻿using Discord_Bot_AI.Models;
+using Discord_Bot_AI.Models;
 using Discord_Bot_AI.Infrastructure;
 using System.Net;
 using System.Net.Http.Json;
@@ -25,10 +25,6 @@ public class RiotService : IDisposable
     
     private bool _disposed;
 
-    /// <summary>
-    /// Initializes the Riot service with IHttpClientFactory for managed HTTP connections.
-    /// </summary>
-    /// <param name="httpClientFactory">Factory for creating HTTP clients.</param>
     public RiotService(IHttpClientFactory httpClientFactory)
     {
         _httpClientFactory = httpClientFactory;
@@ -82,9 +78,6 @@ public class RiotService : IDisposable
         return matchIds?.FirstOrDefault();
     }
     
-    /// <summary>
-    /// Gets detailed match information based on match ID.
-    /// </summary>
     public async Task<MatchData?> GetMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
     {
         var encodedMatchId = Uri.EscapeDataString(matchId);
@@ -92,9 +85,6 @@ public class RiotService : IDisposable
         return await ExecuteWithRateLimitingAsync<MatchData>(url, cancellationToken);
     }
 
-    /// <summary>
-    /// Gets the latest TFT match ID for a given player's PUUID.
-    /// </summary>
     public async Task<string?> GetLatestTftMatchIdAsync(string puuid, CancellationToken cancellationToken = default)
     {
         var encodedPuuid = Uri.EscapeDataString(puuid);
@@ -103,9 +93,6 @@ public class RiotService : IDisposable
         return matchIds?.FirstOrDefault();
     }
 
-    /// <summary>
-    /// Gets detailed TFT match information based on match ID.
-    /// </summary>
     public async Task<TftMatchData?> GetTftMatchDetailsAsync(string matchId, CancellationToken cancellationToken = default)
     {
         var encodedMatchId = Uri.EscapeDataString(matchId);
@@ -213,10 +200,6 @@ public class RiotService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Releases resources used by the service.
-    /// Note: HttpClient is managed by IHttpClientFactory, no need to dispose it manually.
-    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

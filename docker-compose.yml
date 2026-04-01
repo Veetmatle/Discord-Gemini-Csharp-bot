@@ -21,7 +21,6 @@
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
-      # agent-output removed — files transferred via HTTP API
     networks:
       - bot-internal
       - bot-external

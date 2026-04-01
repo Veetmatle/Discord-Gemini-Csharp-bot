@@ -2,7 +2,6 @@ namespace Discord_Bot_AI.Configuration;
 
 /// <summary>
 /// Application settings container loaded from environment variables or config file.
-/// Immutable after creation for thread safety.
 /// </summary>
 public sealed class AppSettings
 {
@@ -13,30 +12,10 @@ public sealed class AppSettings
     public string DataPath { get; init; } = "/app/data";
     public string CachePath { get; init; } = "/app/cache";
     public string LogPath { get; init; } = "/app/logs";
-
-    /// <summary>
-    /// Base URL of the OpenClaw agent container API.
-    /// </summary>
     public string OpenClawBaseUrl { get; init; } = "http://openclaw:8080";
-
-    /// <summary>
-    /// Maximum time in minutes before an agent task is forcefully terminated.
-    /// </summary>
     public int AgentSessionTimeoutMinutes { get; init; } = 10;
-
-    /// <summary>
-    /// Maximum tool rounds the agent may use per task.
-    /// </summary>
     public int AgentMaxRetries { get; init; } = 5;
-
-    /// <summary>
-    /// Maximum number of concurrent agent tasks in the queue.
-    /// </summary>
     public int AgentMaxConcurrentTasks { get; init; } = 2;
-
-    /// <summary>
-    /// Anthropic Claude model identifier used by the OpenClaw agent.
-    /// </summary>
     public string AnthropicAgentModel { get; init; } = "claude-sonnet-4-20250514";
 
     /// <summary>

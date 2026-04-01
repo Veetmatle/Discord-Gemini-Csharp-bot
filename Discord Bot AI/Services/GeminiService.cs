@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Infrastructure;
 using Discord_Bot_AI.Models;
@@ -30,9 +30,6 @@ public class GeminiService : IDisposable
     
     private bool _disposed;
 
-    /// <summary>
-    /// Initializes the Gemini service with the Mscc.GenerativeAI SDK.
-    /// </summary>
     public GeminiService(IHttpClientFactory httpClientFactory, AppSettings settings)
     {
         _httpClientFactory = httpClientFactory;
@@ -127,9 +124,6 @@ public class GeminiService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Generates content using the Mscc.GenerativeAI library.
-    /// </summary>
     private async Task<string> GenerateContentAsync(GeminiRequest request, CancellationToken cancellationToken)
     {
         var fullPrompt = request.Prompt + _promptSuffix;
@@ -189,9 +183,6 @@ public class GeminiService : IDisposable
         return ExtractTextFromResponse(response);
     }
 
-    /// <summary>
-    /// Extracts the text response from Gemini API response.
-    /// </summary>
     private static string ExtractTextFromResponse(GenerateContentResponse? response)
     {
         if (response?.Candidates == null || response.Candidates.Count == 0)
@@ -210,10 +201,6 @@ public class GeminiService : IDisposable
         return string.IsNullOrEmpty(combinedText) ? "No answer found." : combinedText;
     }
 
-    /// <summary>
-    /// Releases resources used by the service.
-    /// SemaphoreSlim must be disposed manually as it holds unmanaged resources.
-    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

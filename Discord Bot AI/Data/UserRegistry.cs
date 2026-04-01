@@ -5,8 +5,7 @@ using Serilog;
 namespace Discord_Bot_AI.Data;
 
 /// <summary>
-/// Thread-safe registry for managing Discord user to Riot account mappings.
-/// Uses ReaderWriterLockSlim for efficient concurrent read access with exclusive write access.
+/// Registry for managing Discord user to Riot account mappings.
 /// </summary>
 public class UserRegistry : IUserRegistry
 {
@@ -173,8 +172,6 @@ public class UserRegistry : IUserRegistry
     /// <summary>
     /// Retrieves a Riot account associated with a Discord user.
     /// </summary>
-    /// <param name="discordUserId">The Discord user's unique identifier.</param>
-    /// <returns>The associated Riot account or null if not found.</returns>
     public RiotAccount? GetAccount(ulong discordUserId)
     {
         _lock.EnterReadLock();
@@ -229,11 +226,7 @@ public class UserRegistry : IUserRegistry
             Log.Information("Loaded {Count} users from registry", _userMap.Count);
         }
     }
-
-
-    /// <summary>
-    /// Releases resources used by the registry.
-    /// </summary>
+    
     public void Dispose()
     {
         if (_disposed) return;

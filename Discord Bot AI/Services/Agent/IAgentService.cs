@@ -1,9 +1,5 @@
 ﻿namespace Discord_Bot_AI.Services.Agent;
 
-/// <summary>
-/// High-level facade for agent task operations.
-/// BotService depends on this interface, not on concrete implementations.
-/// </summary>
 public interface IAgentService
 {
     Task<string> SubmitTaskAsync(

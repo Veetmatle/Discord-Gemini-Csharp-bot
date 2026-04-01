@@ -6,7 +6,6 @@ namespace Discord_Bot_AI.Services.Agent;
 
 /// <summary>
 /// Extracts embedded text from PDF documents using PdfPig library.
-/// Does not support OCR - scanned/image-only PDFs will return minimal or empty text.
 /// </summary>
 public class PdfTextExtractor : IPdfParser
 {

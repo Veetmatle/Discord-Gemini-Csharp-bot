@@ -1,4 +1,4 @@
-﻿using Serilog;
+using Serilog;
 using Serilog.Events;
 
 namespace Discord_Bot_AI.Services;
@@ -38,9 +38,6 @@ public static class LoggingService
         Log.Information("Logging initialized with log path: {LogPath}", logPath);
     }
 
-    /// <summary>
-    /// Flushes pending log entries and closes the logger.
-    /// </summary>
     public static void Shutdown()
     {
         Log.Information("Shutting down logging...");

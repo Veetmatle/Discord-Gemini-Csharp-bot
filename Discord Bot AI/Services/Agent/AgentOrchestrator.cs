@@ -7,8 +7,7 @@ using Serilog;
 namespace Discord_Bot_AI.Services.Agent;
 
 /// <summary>
-/// Manages the agent task queue. Files are fetched via HTTP from OpenClaw —
-/// no shared Docker volume required.
+/// Manages the agent task queue. Files are fetched via HTTP from OpenClaw 
 /// </summary>
 public class AgentOrchestrator : IAgentOrchestrator, IDisposable
 {
@@ -127,8 +126,7 @@ public class AgentOrchestrator : IAgentOrchestrator, IDisposable
 
             task.Status = AgentTaskStatus.Completed;
             task.CompletedAt = DateTime.UtcNow;
-
-            // Fetch file contents via HTTP — no shared volume needed
+            
             AgentFilesResponse? filesResponse = null;
             if (statusResponse.OutputFiles?.Count > 0)
             {

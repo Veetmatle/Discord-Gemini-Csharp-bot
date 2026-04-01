@@ -1,4 +1,4 @@
-﻿using Discord_Bot_AI.Services;
+using Discord_Bot_AI.Services;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -8,9 +8,6 @@ namespace Discord_Bot_AI;
 
 public class Program
 {
-    /// <summary>
-    /// Entry point of the application. Initializes DI container, logging and starts the bot service.
-    /// </summary>
     static async Task Main()
     {
         var configProvider = new EnvironmentConfigProvider();

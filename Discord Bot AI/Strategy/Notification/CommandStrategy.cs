@@ -36,8 +36,6 @@ public class CommandStrategy : IMatchNotification
     /// <summary>
     /// Checks and retrieves the latest match data for a specific Discord user on demand.
     /// </summary>
-    /// <param name="discordId">The Discord user's unique identifier.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
     public async Task CheckUserMatchAsync(ulong discordId, CancellationToken cancellationToken = default)
     {
         var account = _userRegistry.GetAccount(discordId);

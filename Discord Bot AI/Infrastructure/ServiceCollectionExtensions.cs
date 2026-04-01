@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using Discord_Bot_AI.Configuration;
 using Discord_Bot_AI.Data;
 using Discord_Bot_AI.Services;
@@ -21,7 +21,6 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddApplicationServices(this IServiceCollection services, AppSettings settings)
     {
-        // Register settings as singleton
         services.AddSingleton(settings);
         
         // Register HTTP clients with named policies

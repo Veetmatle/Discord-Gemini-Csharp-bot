@@ -2,27 +2,18 @@
 
 namespace Discord_Bot_AI.Models;
 
-/// <summary>
-/// Root object returned by TFT Match v1 endpoint.
-/// </summary>
 public class TftMatchData
 {
     public TftMetadata metadata { get; set; } = new();
     public TftInfo info { get; set; } = new();
 }
 
-/// <summary>
-/// Match metadata containing participant PUUIDs and match ID.
-/// </summary>
 public class TftMetadata
 {
     public string match_id { get; set; } = "";
     public List<string> participants { get; set; } = new();
 }
 
-/// <summary>
-/// Core match information for a TFT game.
-/// </summary>
 public class TftInfo
 {
     public long game_datetime { get; set; }
@@ -58,9 +49,6 @@ public class TftParticipant
     public Dictionary<string, System.Text.Json.JsonElement>? ExtensionData { get; set; }
 }
 
-/// <summary>
-/// An active trait synergy for a TFT participant.
-/// </summary>
 public class TftTrait
 {
     public string name { get; set; } = "";
@@ -70,9 +58,6 @@ public class TftTrait
     public int style { get; set; }
 }
 
-/// <summary>
-/// A unit (champion) on a TFT participant's board.
-/// </summary>
 public class TftUnit
 {
     public string character_id { get; set; } = "";
@@ -86,7 +71,7 @@ public class TftUnit
 }
 
 /// <summary>
-/// Companion (Little Legend) data.
+/// Companion (Little Legend) data
 /// </summary>
 public class TftCompanion
 {

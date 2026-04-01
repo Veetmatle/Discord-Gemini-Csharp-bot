@@ -1,12 +1,8 @@
-﻿using Discord_Bot_AI.Models;
+using Discord_Bot_AI.Models;
 using Serilog;
 
 namespace Discord_Bot_AI.Services.Agent;
 
-/// <summary>
-/// Facade service coordinating PDF parsing, task creation and queue submission.
-/// BotService depends only on IAgentService, not on internal components.
-/// </summary>
 public class AgentService : IAgentService
 {
     private readonly IPdfParser _pdfParser;
@@ -23,9 +19,6 @@ public class AgentService : IAgentService
         set => _orchestrator.OnTaskCompleted = value;
     }
 
-    /// <summary>
-    /// Initializes the service with a PDF parser, task orchestrator, and prompt sanitizer.
-    /// </summary>
     public AgentService(IPdfParser pdfParser, IAgentOrchestrator orchestrator, IPromptSanitizer promptSanitizer)
     {
         _pdfParser = pdfParser;
@@ -86,17 +79,11 @@ public class AgentService : IAgentService
         return taskId;
     }
 
-    /// <summary>
-    /// Starts the background processing loop of the orchestrator.
-    /// </summary>
     public Task StartAsync(CancellationToken cancellationToken)
     {
         return _orchestrator.StartProcessingAsync(cancellationToken);
     }
-
-    /// <summary>
-    /// Stops the orchestrator gracefully.
-    /// </summary>
+    
     public Task StopAsync()
     {
         return _orchestrator.StopAsync();

@@ -189,7 +189,6 @@ public class RiotImageCacheService : IDisposable
     {
         if (itemId == 0) return string.Empty;
         
-        // Skip known invalid items (quest components, removed items, etc.)
         if (_invalidItemIds.ContainsKey(itemId)) return string.Empty;
 
         string fileName = $"{itemId}.png";
@@ -202,26 +201,24 @@ public class RiotImageCacheService : IDisposable
         }
         
         await EnsureLatestVersionAsync();
-
-        // Try Data Dragon first
+        
         string ddUrl = $"https://ddragon.leagueoflegends.com/cdn/{_version}/img/item/{fileName}";
         var result = await DownloadImageWithFallbackAsync(ddUrl, localPath, itemId, cancellationToken);
         
         if (!string.IsNullOrEmpty(result)) return result;
         
-        // Fallback to Community Dragon
+        // Fallback 
         string cdUrl = $"{CommunityDragonBaseUrl}/{itemId}_class_{itemId}_inventoryicon.png";
         result = await DownloadImageAsync(cdUrl, localPath, cancellationToken, suppressWarning: true);
         
         if (!string.IsNullOrEmpty(result)) return result;
         
-        // Alternative CDragon path format
+        // Alternative CDragon path 
         string cdUrlAlt = $"https://raw.communitydragon.org/latest/game/assets/items/icons2d/{itemId.ToString().ToLower()}_class_{itemId.ToString().ToLower()}_inventoryicon.png";
         result = await DownloadImageAsync(cdUrlAlt, localPath, cancellationToken, suppressWarning: true);
         
         if (string.IsNullOrEmpty(result))
         {
-            // Mark as invalid to skip future attempts
             _invalidItemIds[itemId] = true;
             Log.Debug("Item {ItemId} not found in Data Dragon or Community Dragon, marking as invalid", itemId);
         }
@@ -387,7 +384,7 @@ public class RiotImageCacheService : IDisposable
                 }
                 catch
                 {
-                    // Ignore files that can't be accessed
+                    // Ignore
                 }
             }
             
@@ -458,10 +455,7 @@ public class RiotImageCacheService : IDisposable
         
         return deletedCount;
     }
-
-    /// <summary>
-    /// Releases resources used by the cache service.
-    /// </summary>
+    
     public void Dispose()
     {
         if (_disposed) return;

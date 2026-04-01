@@ -43,16 +43,11 @@ public class AgentTaskResult
     public List<AgentOutputFile> OutputFiles { get; set; } = new();
     public string? ErrorMessage { get; set; }
     public string? Summary { get; set; }
-
-    /// <summary>
-    /// Plain-text answer returned by the agent instead of a file.
-    /// </summary>
     public string? DirectResponse { get; set; }
 }
 
 /// <summary>
 /// Represents a single output file produced by the agent.
-/// File content is transferred as base64 over HTTP — no shared volume needed.
 /// </summary>
 public class AgentOutputFile
 {

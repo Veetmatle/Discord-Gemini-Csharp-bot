@@ -87,7 +87,6 @@ public class PolitechnikaService
     /// Pre-filters scraped links to keep only the newest version of each document.
     /// Groups links by normalized base name, then picks the one with the newest date
     /// or highest version number in the text/URL.
-    /// Now operates on List&lt;ScrapedLink&gt; so duplicate link texts with different URLs are preserved.
     /// </summary>
     private static List<ScrapedLink> FilterNewestVersions(List<ScrapedLink> links)
     {

@@ -1,15 +1,9 @@
-﻿# Discord Bot AI - Docker Image (Zintegrowane Grafiki)
-# Multi-stage build for optimized image size
-
-# Build
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+﻿FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 
-# Copy project file and restore dependencies
 COPY ["Discord Bot AI/Discord Bot AI.csproj", "Discord Bot AI/"]
 RUN dotnet restore "Discord Bot AI/Discord Bot AI.csproj"
 
-# Copy source code and build
 COPY . .
 WORKDIR "/src/Discord Bot AI"
 RUN dotnet build -c Release -o /app/build

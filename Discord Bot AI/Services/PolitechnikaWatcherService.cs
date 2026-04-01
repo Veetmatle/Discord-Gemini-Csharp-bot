@@ -45,7 +45,7 @@ public class PolitechnikaWatcherService : IDisposable
     public bool IsRunning => _isRunning;
     
     /// <summary>
-    /// Returns a snapshot of current subscriptions. Thread-safe.
+    /// Returns a snapshot of current subscriptions. 
     /// </summary>
     public async Task<List<WatcherSubscription>> GetSubscriptionsAsync(CancellationToken ct = default)
     {
@@ -94,7 +94,7 @@ public class PolitechnikaWatcherService : IDisposable
     }
 
     /// <summary>
-    /// Checks if a specific channel is subscribed. Thread-safe.
+    /// Checks if a specific channel is subscribed. 
     /// </summary>
     public async Task<bool> IsChannelSubscribedAsync(ulong guildId, ulong channelId, CancellationToken ct = default)
     {

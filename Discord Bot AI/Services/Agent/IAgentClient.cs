@@ -3,8 +3,7 @@
 namespace Discord_Bot_AI.Services.Agent;
 
 /// <summary>
-/// Abstracts communication with the external AI agent container (OpenClaw).
-/// Files are transferred via HTTP as base64 — no shared Docker volume required.
+/// Abstracts communication with the external AI agent container (OpenClaw)
 /// </summary>
 public interface IAgentClient
 {

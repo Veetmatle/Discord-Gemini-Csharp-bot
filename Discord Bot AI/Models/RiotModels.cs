@@ -1,8 +1,4 @@
 ﻿namespace Discord_Bot_AI.Models;
-
-/// <summary>
-/// Represents a Riot Games account linked to a Discord user.
-/// </summary>
 public class RiotAccount
 {
     public string puuid { get; set; }
@@ -10,11 +6,6 @@ public class RiotAccount
     public string tagLine { get; set; }
     public string? LastMatchId { get; set; }
     public string? LastTftMatchId { get; set; }
-    
-    /// <summary>
-    /// List of Discord Guild (server) IDs where this account is registered.
-    /// Allows the same account to receive notifications on multiple servers.
-    /// </summary>
     public List<ulong> RegisteredGuildIds { get; set; } = new();
 }
 
@@ -60,7 +51,7 @@ public class Participant
     public string championName { get; set; }
     public bool win { get; set; }
     
-    // ITEMS: item0-item5 are main inventory slots, item6 is trinket (ward)
+    // item0-item5 are main inventory slots, item6 is trinket (ward)
     // roleBoundItem is the role quest slot (boots for ADC after quest completion, etc.)
     public int item0 { get; set; }
     public int item1 { get; set; }
@@ -68,14 +59,10 @@ public class Participant
     public int item3 { get; set; }
     public int item4 { get; set; }
     public int item5 { get; set; }
-    public int item6 { get; set; }  // Trinket slot
+    public int item6 { get; set; }  // Trinket
     public int roleBoundItem { get; set; }
     
     public int champLevel { get; set; }
-    
-    /// <summary>
-    /// Alias for champLevel to match renderer expectations.
-    /// </summary>
     public int level => champLevel;
     
     // Additional stats
